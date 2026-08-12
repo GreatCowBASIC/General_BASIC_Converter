@@ -37,7 +37,7 @@ From the command line
 2. **Rewrite directives and declarations.**
    - `Device`/`Xtal` lines become a merged `#chip` directive.
    - `Symbol name = value` and `Declare name = value` / `Declare name value` both become `#define name value`.
-   - `Config1`..`Config7` (PIC18F/enhanced-core numbered fuse words) all collapse to GCBASIC's single `#config` directive � the trailing number is a General Basic-ism with no GCBASIC meaning and is dropped entirely.
+   - `Config1`..`Config7` (PIC18F/enhanced-core numbered fuse words) all collapse to GCBASIC's single `#config` directive the trailing number is a General Basic-ism with no GCBASIC meaning and is dropped entirely.
    - `Declare LCD_xxx ...` is commented out and flagged for review (no LCD library is assumed).
 
 3. **Translate literals, statements, and control-flow forms.**
@@ -53,9 +53,9 @@ From the command line
    - `For i = start UpTo end` -> `For i = start To end` (GCBASIC has no `UpTo`/`DownTo`).
    - `Select Case` comparisons like `Case > n` / `Case < n` -> `Case n To <upper-bound>` / `Case <lower-bound> To n - 1`, with the bound inferred from the variable's declared type where possible; flagged for review when it can't be determined safely.
 
-4. **Command lookup table** (`COMMAND_LOOKUP`) � a single, easily-extended table for one-off statement-level substitutions that don't need bespoke logic. Two kinds of entries:
-   - `"rewrite"` � the match is replaced outright with new GCBASIC syntax.
-   - `"comment_out"` � the original line is kept but commented out with a `//!` marker, with a `//! use XXX` hint added on the line above, for constructs with no safe automatic 1:1 rewrite.
+4. **Command lookup table** (`COMMAND_LOOKUP`) a single, easily-extended table for one-off statement-level substitutions that don't need bespoke logic. Two kinds of entries:
+   - `"rewrite"` the match is replaced outright with new GCBASIC syntax.
+   - `"comment_out"` the original line is kept but commented out with a `//!` marker, with a `//! use XXX` hint added on the line above, for constructs with no safe automatic 1:1 rewrite.
 
    Current entries:
    - `Dim x As y.n` (bit-alias declaration) -> `Dim x As Bit Alias y.n`.
@@ -63,11 +63,11 @@ From the command line
    - `CErase` -> commented out with `//! use HEFEraseBlock`.
    - `CWrite` -> commented out with `//! use HEFWriteBlock`.
 
-   Adding a new one-off replacement only requires a new entry in this table � no other code needs to change. Each match increments a `lookup_usage` counter, so `main()` prints one summary line per construct actually found (not one per occurrence).
+   Adding a new one-off replacement only requires a new entry in this table no other code needs to change. Each match increments a `lookup_usage` counter, so `main()` prints one summary line per construct actually found (not one per occurrence).
 
-5. **Inline expression substitutions** (not in the lookup table, since these can occur more than once per statement � e.g. inside an `If ... And ...` line � rather than being anchored to the whole line):
+5. **Inline expression substitutions** (not in the lookup table, since these can occur more than once per statement e.g. inside an `If ... And ...` line rather than being anchored to the whole line):
    - `CRead expr` / `CRead (expr)` -> `HEFReadWord( expr )`. Handles both the bare-expression form (`CRead HEF_Address + 1`) and the already-parenthesized form.
-   - `REGISTERbits_FIELD` (the MPLAB XC8 C-header bitfield naming convention, e.g. `INTCONbits_GIE`) -> `REGISTER.FIELD` (e.g. `INTCON.GIE`). General-purpose � matches any identifier containing `bits_`, not a fixed list of registers.
+   - `REGISTERbits_FIELD` (the MPLAB XC8 C-header bitfield naming convention, e.g. `INTCONbits_GIE`) -> `REGISTER.FIELD` (e.g. `INTCON.GIE`). General-purpose matches any identifier containing `bits_`, not a fixed list of registers.
 
    Both still report through the same `lookup_usage` counter/summary mechanism as the table above.
 
@@ -131,7 +131,7 @@ After conversion:
 1. Review the generated source, especially anywhere marked `'>>> REVIEW:` or `//!`.
 2. Inspect the one-line-per-construct summary printed to the console.
 3. Compile the output with the real GCBASIC compiler.
-4. Fix any remaining syntax or semantic issues manually � in particular, the `HSerIn`/`SerIn` timeout approximations, and any Dim modifier flagged as unrecognized.
+4. Fix any remaining syntax or semantic issues manually in particular, the `HSerIn`/`SerIn` timeout approximations, and any Dim modifier flagged as unrecognized.
 
 ## Notes
 
