@@ -1,0 +1,6 @@
+#chip 16F15355, 32
+#include "protonexample2.prt"
+#option Explicit
+
+
+// Now see "protonexample2.gcb" after compilation

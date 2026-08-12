@@ -1,0 +1,1044 @@
+'***************************************************************
+'evan
+'8.0.19 alpha
+' type 33 ack to type 1 added if PHY enabled 
+'8.0.18 alpha
+'new ptt mute. recovery done from app
+' no interrupt just poll in uart loop
+'-------------------------------------------------------------------------------
+'**** Added by Fuse Configurator ****
+' Use the Fuses Tab to change these settings
+Device = 16F15355
+Declare Optimiser_Level = 0
+Declare Bootloader = OFF
+
+' ****** HEF workround from Les
+
+'no EEPROM in 16F15355, so need to use HEF ram instead - more complicated
+Declare EEPROM_Size = 64        ' Indicate that there are 64 bytes of EEPROM (HEF in this case)
+Declare EEPROM_Address = $1F80  ' Set the address of the EEPROM (HEF in this case)
+'Block read/write buffer
+Dim HEF_Array [64] As Byte Heap
+Dim i As Byte
+
+
+'see also HEF subs
+' **********************
+'  ******* FEXTOSC_OFF VITAL OtherWise A.7 INOP
+Config1 FEXTOSC_OFF, RSTOSC_HFINT32, CLKOUTEN_OFF, CSWEN_OFF, FCMEN_OFF
+Config2 MCLRE_OFF, PWRTE_OFF, LPBOREN_OFF, BOREN_ON, BORV_HI, ZCD_OFF, PPS1WAY_OFF, STVREN_ON
+Config3 WDTCPS_WDTCPS_31, WDTE_OFF, WDTCWS_WDTCWS_7, WDTCCS_SC
+Config4 BBSIZE_BB512, BBEN_OFF, SAFEN_ON, WRTAPP_OFF, WRTB_OFF, WRTC_OFF, WRTSAF_OFF, LVP_OFF
+Config5 CP_OFF
+
+'**** End of Fuse Configurator Settings ****
+'-------------------------------------------------------------------------------
+
+
+    '$define cBaud 300                                  ' The Baud Rate required
+    '$define cBaudVal $eval ((1000000 / cBaud) - 20)    ' The Baud value for Serin and Serou
+'Auto KEY (from TMR0reg)
+'    Dim T1key_enc As Byte
+'    Dim T2key_enc As Byte
+'    Dim T3key_enc As Byte
+'    Dim T4key_enc As Byte
+'    Dim T1key As Byte
+'    Dim T2key As Byte
+'    Dim T3key As Byte
+'    Dim T4key As Byte
+
+' declare symbols
+'    Symbol inactive = 1 ' for mute line PORTB.5
+'    Symbol active = 0
+'    Symbol CR = $0A
+'    Symbol ETB = $17
+
+     Xtal = 32
+
+
+    '-------- PORT SETUP DF-72 -----------
+     'PORT A
+     ANSELA = %00000000   'ALL DIGITAL
+     TRISA = %00001110    '
+     ODCONA = %00000000   ' all std push pull o/p
+     'PORT B
+     ANSELB = %00000000   'ALL DIGITAL
+     TRISB = %00001001    ' B0 - AUX1 IN, B3 - RX
+     ODCONB = %00000000   ' all std push pull o/p
+
+     WPUB.3 = 1           ' Weak pullup to assist 10k with rx risetime
+
+     'PORT C
+     ODCONC = %00000000   ' all std push pull
+     ANSELC = %00000100   'ALL DIGITAL except C2 volts A/D
+     TRISC = %10100101   ' C0 - CH9121 RX OUT, C2 - ADC, C5 - hserin, C7 - 2in
+
+     PORTE.3 = 1    'set high (MCLR pin as output)
+'*************************************************************************************************************************************************
+    '   *******
+    '   * ADC *
+    '   *******
+     FVRCON = %10001111          ' FVR enabled, 2.048 V
+     ADCON0 = %01001001          ' Define ADC channel as RC2 and ENable ADC (bit 0)
+     ADCON1 = %00110011          ' LEFT justified, RC osc, FVR
+     'ADCON0 = %11110001          'TEMP SENS
+    'Declare Adin_Tad = FRC '64_FOSC
+    'Declare Adin_Stime = 50
+    'Declare Adin_Res = 8
+
+'    ADC monitoring
+    'Symbol ADC_Volts = PORTC.2    'adc in for volts monitoring
+
+    '******** CCP ********
+
+'    'comparator  C1
+'     CM1CON0.7 = 0  ' comparator disabled  for now
+'     CM1CON0.6 = 0  ' non-inverted polarity
+'     CM1CON0.4 = 0  ' output non-inverted
+
+'     '*** NOTE DATA SHEET SAYS CMxNSEL, CMxPSEL NOT PCH/NCH
+'     CM1PCH  = %00000110  ' Set positive input to FVR internal
+'     CM1NCH  = %00000000  ' Set negative input to C1IN0- PIN
+'     'MAP C1IN0- TO RC2:
+
+'     CCP1CON
+
+'     CM2CON0.7 = 0  ' comparator 2 disabled
+
+'     CM1CON1.1 = 1  ' Set int INTN on positive going edge
+
+'     FVRCON = %10000100   ' FVR enabled and gain set to X1 (1.024V)
+
+
+'     'Direct RC2 to handle C1OUT
+'      RC3PPS = %00010011
+
+    'OUTPUTS
+    Symbol LED = LATB.2          ' 1 to activate
+    Symbol MOD = LATA.4          ' 1 To activate
+    Symbol ONOFF = LATC.1        ' 1 To activate
+
+    Symbol ATTEN_INF = LATA.1    ' 1 To activate
+    Symbol WPU_ATTEN_INF = WPUA.1
+
+    Symbol ATTEN_12 = LATA.2     ' 1 To activate
+    Symbol WPU_ATTEN_12 = WPUA.2
+
+    Symbol ATTEN_6 = LATA.3      ' 1 To activate
+    Symbol WPU_ATTEN_6 = WPUA.3
+
+
+    'AUX IO
+    Symbol AUX1_IN = PORTB.0      '
+    Symbol AUX2_IN = PORTC.7      '
+    Symbol AUX1_OUT = LATB.1      '
+    Symbol AUX2_OUT = LATC.4      '
+
+    'PHY
+    Symbol PHY_Enable = LATA.5
+    Symbol CH9121_CFG = LATA.7  ' high puts CH9121 into cfg mode (low at CH)
+
+     '$define cBaud 200                                   ' The Baud Rate required
+     '$define cBaudVal $eval ((1000000 / cBaud) - 20)     ' The Baud value for Serin and Serout
+
+    '****  / board rev 4.6 ***********************************************
+
+'create flash table
+    'Dim flashTable As Flash8 = $01,$02,$03,$04,$05,$06,$07
+    'IO_config_byte at offset 0
+    ' Delay_Index at offset 1
+
+'declare variables
+    Dim OmnirigBuffer As Byte
+    Dim HEF_Address As Word = $1F80
+    Dim Serno As String *8     ' serial number
+    Dim enc_CONTROL_byte As Byte
+    Dim DATA_byte As Byte
+    Dim DATA_byte_Old As Byte
+    Dim Delay_Index As Byte
+    Dim CONTROL_byte As Byte
+    Dim enc_DATA_byte As Byte
+    Dim LCU_BS_1 As Byte
+    Dim LCU_BS_2 As Byte
+    Dim KEY_byte As Byte
+    Dim led_count As Byte
+    Dim ATTEN_BYTE As Byte       ' holds current atten bit state (for post ptt recovery)
+    Dim Delay_actual As Byte    ' actual PTT delay value
+    Dim IO_config_byte As Byte
+    Dim Chan_1_PTT_Set As IO_config_byte.2
+    Dim CH1 As Byte
+    Dim CH1_IO_Cfg As Byte
+    Dim CH2 As Byte
+    Dim CH2_IO_Cfg As Byte
+    Dim PHY_Power As Byte
+    Dim ADC_Byte As Byte           'ADC hi byte reading
+    Dim ADC_Full As Word
+    Dim Loop_Count As Byte         'count for ADC sample rate
+
+    Dim OLD_WPU_ATTEN_INF  As Byte
+    Dim OLD_WPU_ATTEN_6  As Byte
+    Dim OLD_WPU_ATTEN_12  As Byte
+    Dim Atten_Prev As Byte
+
+    Dim Flg_PTT As Byte
+    Dim Flg_QS As Byte             'set to 1 when byte 90 / 91 to LCU detected: for QS Auto
+
+    Dim IO_State As Byte
+    Dim Old_IO_State As Byte
+
+    Dim Old_Aux1_In As Byte
+    Dim Old_Aux2_In As Byte
+
+    Dim Send_Byte As Byte
+
+    'HEF Memory define (last 128 bytes)
+    ' Dim wAddress As Word = $1F80   'lowest edge of HEF RAM
+
+    Dim ADC_Lower As Byte
+    Dim ADC_Upper As Byte
+    Dim Quiet_Step As Byte
+    Dim Under_Volt As Byte
+    Dim Over_Volt As Byte
+    Dim Current_Trip As Byte
+
+'set startup conditions
+     'LATA = 0
+     'LATB = 0
+     'LATC = 0
+
+    'LATA.3 = 1      'set MCLR pin (as logic pin) high output
+    AUX1_OUT = 0       ' no internal drive on PTT line
+    AUX2_OUT = 0
+    MOD = 0          ' 1 To activate
+    ONOFF = 0       ' 1 for  ON
+    WPU_ATTEN_INF = 0     ' 0 = 24db, 1 To remove  . in circuit when powered off
+    WPU_ATTEN_12 = 0     ' 0 = 12db,1 To remove
+    WPU_ATTEN_6  = 0     ' 0 = 6db,1 To remove
+    'MUTE = 0        ' 0 To activate
+    LED = 0
+    Serno = "14022101"
+    Loop_Count = 100   'for 1 sec samples
+
+'**********************************************************************
+'************* CLC  CONFIG  *******************************************
+'**********************************************************************
+CLC:
+
+'DISABLE CELLS PRIOR TO CONFIG
+    CLC1CON = %00000010      ' DISABLED, 4 INP AND
+    CLC2CON = %00000000      ' DISABLED, AND-OR
+    CLC3CON = %00000000      ' DISABLED, AND-OR
+    CLC4CON = %00000000      ' DISABLED, AND-OR   'NOT USED
+
+'DEFINE CLC PPS INPUTS DF-72
+
+    CLCIN0PPS = 0x10   ' /was RC0 DF-72
+
+    CLCIN1PPS = 0x07   'now with new pcb 8.0.3 is RA7 / was RC2
+
+    CLCIN2PPS = 0x0B   'RB3 DF-72
+
+    'CLCIN3PPS = 0x13   'RC3 DF-72
+
+ 'CLC OUTPUTS DF-X    TABLE 15.3 P198
+
+    RC6PPS = 0x01  'CLC1 OUTPUT DF-X
+
+    RA6PPS = 0x02  'CLC2 OUTPUT to CH / DF-X
+
+    RB5PPS = 0x03  'CLC3 OUTPUT to USB / DF-X
+
+'*******************  CLC1 DATA INPUT SELECTION BITS  *********************
+
+    CLC1POL = %00000000    'OUTPUT POLARITY TRUE
+
+    'What's put on the buses (only 2 needed for 2 unique input AND)
+    CLC1SEL0 = 0x00    'CLCIN0PPS   RC0  CH9121 RX IN
+    CLC1SEL1 = 0x02    'CLCIN2PPS   RB3  USB RX IN
+
+    'What's taken off the buses
+    CLC1GLS0 = 0x02    ' GATED TO SEL0 / RC0 TRUE
+    CLC1GLS1 = 0x02    ' GATED TO SEL0 / RC0
+    CLC1GLS2 = 0x08    ' GATED TO SEL1 / RB3 TRUE
+    CLC1GLS3 = 0x08    ' GATED TO SEL1 / RB3
+
+' **********************CLC2 DATA INPUT SELECTION BITS  ********************
+
+    CLC2POL = %00000000      'OUTPUT POLARITY TRUE
+
+    'What's put on the buses
+    CLC2SEL0 = 0x02    'CLCIN2   RB3
+    CLC2SEL1 = 0x01    'CLCIN1   RC2
+    CLC2SEL2 = 0x1F    'EUSART Tx
+
+    'What's taken off the buses
+    CLC2GLS0 = 0x02    ' input 1 SEL0 TRUE
+    CLC2GLS1 = 0x08    ' input 2 SEL1 RC2 TRUE
+    CLC2GLS2 = 0x04    ' input 3 SEL1 RC2 INVERTED
+    CLC2GLS3 = 0x20    ' input 4 SEL2 EUSART TX
+
+' *************************CLC3 DATA INPUT SELECTION BITS ************************
+
+    CLC3POL = %00000000       'OUTPUT POLARITY TRUE
+
+    'What's put on the buses
+    CLC3SEL0 = 0x00    'CLCIN0   RC0
+    CLC3SEL1 = 0x01    'CLCIN1   RC2
+    CLC3SEL2 = 0x1F    'EUSART 1 Tx
+
+    'What's taken off the buses
+    CLC3GLS0 = 0x20    ' GATED TO SEL2 / EUSART Tx
+    CLC3GLS1 = 0x04    ' GATED TO SEL1 INVERTED
+    CLC3GLS2 = 0x08    ' GATED TO SEL1 TRUE / RC2
+    CLC3GLS3 = 0x02    ' GATED TO SEL0 / RC0
+
+
+'ENABLE CELLS AFTER CONFIG
+
+    CLC1CON = %10000010      ' OUTPUT ENABLED, 4 INP AND
+
+    CLC2CON = %10000000      ' ENABLED, AND-OR
+
+    CLC3CON = %10000000      ' ENABLED, AND-OR
+
+    'CLC4CON = %10000000      ' ENABLED, AND-OR
+
+  ' Startup 'R' in morse
+    LED = 0 : DelayMS 1500 : LED = 1 : DelayMS 200 : LED = 0    ' 'R' morse
+    DelayMS 200 : LED = 1 : DelayMS 500 : LED = 0: DelayMS 200 : LED = 1 :DelayMS 200 : LED = 0 : DelayMS 600
+
+    'Initialise HEF values
+    If CRead HEF_Address = $3FFF And CRead HEF_Address + 1 = $3FFF Then   'assume in erased state after programming
+
+        GoSub Make_HEF_Array 'create new array
+
+        HEF_Array[0] = 0 'IO_config_byte     'update the new array
+        HEF_Array[1] = 2 'Delay_Index        'with default value
+        HEF_Array[2] = 0 'PHY_Power
+        HEF_Array[3] = 1 'ADC_Lower
+        HEF_Array[4] = 255 'ADC_Upper
+        HEF_Array[5] = 0 'Quiet_Step
+        HEF_Array[6] = 0 'Under-Volt log
+        HEF_Array[7] = 0 'Over-Volt log
+        HEF_Array[8] = 0 'Current Trip log
+
+        GoSub Write_HEF    'burn new array into HEF
+
+    End If
+
+    IO_config_byte = CRead HEF_Address
+    Delay_Index = CRead HEF_Address + 1
+    PHY_Power =  CRead HEF_Address + 2
+    ADC_Lower =  CRead HEF_Address + 3
+    ADC_Upper =  CRead HEF_Address + 4
+    Quiet_Step = CRead HEF_Address + 5
+
+    'power up PHY if set
+     If PHY_Power = 1 Then PHY_Enable = 1: Else: PHY_Enable = 0    ' power up PHY and route data with CLC
+
+    '************ UART ************ UART ***********************
+    'TRANSMIT
+    Declare Hserial_Baud = 9600
+    Declare Hserial_Clear = On
+
+    'RECEIVE
+     Declare HSERIN_PIN PORTC.5 'DF-72
+     RC1STA.7 = 1  ' SPEN = 1    ENABLE SERIAL PORT
+     RC1STA.4 = 1  ' CREN = 1    CONTINUOUS RECEIVE
+     TX1STA.4 = 0  ' ASYNC
+    ' *********************************************************
+
+    CH9121_CFG = 0
+    Flg_QS = 0 'clear QS auto flag
+
+' ********************* MAIN *******************************
+Main:
+    ' wait for incoming USART data with 10 ms timeout
+    ' HSerIn 5,IO2_Check,[DATA_byte,CONTROL_byte,KEY_byte]
+    HSerIn 5,Loop_Checks,[CONTROL_byte, DATA_byte]    ' *** ORDER REVERSED!!!
+
+    GoSub Data_Process    'jump when data received
+
+Loop_Checks:              'here on uart timeout
+
+    'build current IO state
+    IO_State = 0
+    If AUX1_IN = 1 Then IO_State = 1
+    If AUX2_IN = 1 Then IO_State = IO_State + 2
+
+    'Dim Old_Aux1_In As Byte
+    'Dim Old_Aux2_In As Byte
+
+'    DEC LOOP_COUNT
+'    IF LOOP_COUNT < 1 THEN
+'         GOSUB READ_ADC
+'         CONTROL_byte = 29   'frame 10 reply
+'         HSerOut [CONTROL_byte, ADC_Byte]
+'    END IF
+
+    If Old_IO_State <> IO_State  Then          'do nothing until there are changes
+            LED = 0
+            'find current I/O configuration
+            IO_config_byte = CRead HEF_Address
+            Delay_Index = CRead HEF_Address + 1
+
+            CH1_IO_Cfg = (IO_config_byte & %00001111)   'find out if any PTT in set
+            CH2_IO_Cfg = (IO_config_byte & %11110000)   'find out if any PTT in set
+
+            'test CH1
+            If CH1_IO_Cfg = 4 Then
+
+                    If  Old_Aux1_In <>  AUX1_IN Then 'see what's changed
+
+                            If AUX1_IN = 0 Then   'valid CH1 PTT set
+
+                                    OLD_WPU_ATTEN_INF = WPU_ATTEN_INF   'save for recovery post PTT
+                                    OLD_WPU_ATTEN_12 = WPU_ATTEN_12
+
+                                    WPU_ATTEN_INF = 0     'isolate rx
+                                    WPU_ATTEN_12 = 0      'terminate coax
+
+                                    If CH2_IO_Cfg = 128 And Delay_Index = 0 Then  'Aux out first
+                                        AUX2_OUT = 1   'if no delay, action immed.
+                                        SerOut MOD,4980,[122]  ' send mute code to LCU
+                                    ElseIf CH2_IO_Cfg = 128 Then   ' assumed delay. Aux out second
+                                        SerOut MOD,4980,[122]  ' send mute code to LCU
+                                        GoSub Get_Delay_Actual
+                                        DelayMS  Delay_actual
+                                        AUX2_OUT = 1
+                                    Else                      ' send mute to LCU with no CH2 action
+                                        SerOut MOD,4980,[122]            
+                                    End If
+
+                            ElseIf AUX1_IN = 1 Then   'valid CH1 PTT released
+
+                                        ' Test for CH2 set as PTT out
+                                        If CH2_IO_Cfg = 128  And Delay_Index = 0 Then
+                                                AUX2_OUT = 0   'release immed.
+                                        ElseIf  CH2_IO_Cfg = 128 Then
+                                                AUX2_OUT = 0   'release immed.
+                                                GoSub Get_Delay_Actual
+                                                DelayMS  Delay_actual
+                                        End If
+                                    SerOut MOD,4980,[123]  ' send unmute code to LCU
+
+                                    WPU_ATTEN_INF = OLD_WPU_ATTEN_INF   'recover saved values
+                                    WPU_ATTEN_12 = OLD_WPU_ATTEN_12
+                            End If
+                    Old_Aux1_In = AUX1_IN
+                    End If
+             End If
+
+             'Test CH2
+             If CH2_IO_Cfg = 64 Then
+
+                    If  Old_Aux2_In <> AUX2_IN Then 'see what's changed
+
+                            If AUX2_IN = 0 Then   'valid CH1 PTT set
+
+                                    OLD_WPU_ATTEN_INF = WPU_ATTEN_INF   'save for recovery post PTT
+                                    OLD_WPU_ATTEN_12 = WPU_ATTEN_12
+
+                                    WPU_ATTEN_INF = 0     'isolate rx
+                                    WPU_ATTEN_12 = 0      'terminate coax
+
+                                    If CH1_IO_Cfg = 8 And Delay_Index = 0 Then  'Aux out first
+                                        AUX1_OUT = 1   'if no delay, action immed.
+                                        SerOut MOD,4980,[122]  ' send mute code to LCU
+                                    ElseIf CH1_IO_Cfg = 8 Then   ' assumed delay. Aux out second
+                                        SerOut MOD,4980,[122]  ' send mute code to LCU
+                                        GoSub Get_Delay_Actual
+                                        DelayMS  Delay_actual
+                                        AUX1_OUT = 1
+                                    Else                      ' send mute to LCU with no CH1 action
+                                        SerOut MOD,4980,[122]               
+                                    End If
+
+                            ElseIf AUX2_IN = 1 Then   'valid CH1 PTT released
+                                       ' Test for CH1 set as PTT out
+                                        If CH2_IO_Cfg = 8  And Delay_Index = 0 Then
+                                                AUX2_OUT = 0   'release immed.
+                                        ElseIf  CH2_IO_Cfg = 8 Then
+                                                AUX2_OUT = 0   'release immed.
+                                                GoSub Get_Delay_Actual
+                                                DelayMS  Delay_actual
+                                        End If
+                                    SerOut MOD,4980,[123]  ' send unmute code to LCU
+
+                                    WPU_ATTEN_INF = OLD_WPU_ATTEN_INF   'recover saved values
+                                    WPU_ATTEN_12 = OLD_WPU_ATTEN_12
+                            End If
+                    Old_Aux2_In = AUX2_IN
+                    End If
+             End If
+
+            'send home any change
+            Send_Byte = 0
+            If AUX1_IN = 0 Then Send_Byte = 1
+            If AUX2_IN = 0 Then Send_Byte = Send_Byte + 2
+            CONTROL_byte = 3 ' FRAME TYPE 3
+            HSerOut [CONTROL_byte, Send_Byte]         ' SEND update BACK TO PC
+            
+            'build old IO state
+            Old_IO_State = 0
+            If AUX1_IN = 1 Then Old_IO_State = 1
+            If AUX2_IN = 1 Then Old_IO_State = Old_IO_State + 2
+    End If
+
+    GoSub Read_ADC
+
+    If ONOFF = 1 Then LED = 1    'don't relight LED if CIU off
+
+    GoTo Main
+
+
+
+Data_Process:
+
+    ' ignore cfg mode unless cancel
+    If CH9121_CFG = 1 Then    ' if CFG set, only 19,0 can pass
+         If CONTROL_byte <> 19 And DATA_byte <> 0 Then GoTo Main
+    End If
+
+    If ONOFF = 1 Then LED = 0       ' LED off
+
+    Select Case CONTROL_byte      ' action depending on received frame type
+
+        Case 1    ' Frame 1 DATA byte destined for LCU
+            GoSub Handle_Type_1  ' inc Atten and LCU power
+
+        Case 2    ' Frame 2 Read I/O state
+            GoSub Send_PC_Reply  '(FRAME 3)
+
+        Case 4     ' Frame 4 Change I/O state
+           GoSub CHANGE_IO ' interrupt generated will create a PC reply automatically
+
+        Case 5     ' Frame 5 Change I/O Settings (FRAME 6 REPLIES)
+            IO_config_byte = DATA_byte     ' update the reference byte for the CH1 and CH2 profiles
+
+            'update HEF
+            GoSub Make_HEF_Array
+            HEF_Array[0] = IO_config_byte
+            GoSub Write_HEF
+
+            DelayMS 50
+
+            DATA_byte = CRead HEF_Address           ' read I/O config  byte
+            CONTROL_byte = 6
+            HSerOut [CONTROL_byte, DATA_byte]
+
+        Case 7     ' Frame 7 Get I/O Settings FRAME 6 REPLY
+            DATA_byte = CRead HEF_Address
+            CONTROL_byte = 6
+            HSerOut [CONTROL_byte, DATA_byte]
+
+        Case 8     ' Frame 8 LCU volts
+            If DATA_byte = 1 Then
+                   ONOFF = 1       ' power on
+                   LED = 1         ' LED on
+            Else
+                   ONOFF = 0       ' power off
+                   LED = 0         ' LED off
+            End If
+            'reply with frame 40 - ack to link on command
+            CONTROL_byte = 40   'frame 10 reply
+            'KEY_byte = Random
+            'enc_DATA_byte = DATA_byte ^ KEY_byte       ' re-encrypt reply
+            'enc_CONTROL_byte = CONTROL_byte ^ KEY_byte
+            'HSerOut [enc_DATA_byte, enc_CONTROL_byte, KEY_byte]    ' SEND FRAME BACK TO PC
+             HSerOut [CONTROL_byte, DATA_byte]
+            'DelayMS 100  'settle
+            INTCONbits_GIE = 1   'enable interrupts now unit is ON
+
+        Case 9   'Frame 9 Server status poll (sequence)
+             CONTROL_byte = 10   'frame 10 reply
+             'Data_byte = 0 'not used
+            'Send reply to PC
+           ' KEY_byte = Random
+           ' enc_DATA_byte = DATA_byte ^ KEY_byte       ' re-encrypt reply
+            'enc_CONTROL_byte = CONTROL_byte ^ KEY_byte
+            'HSerOut [enc_DATA_byte, enc_CONTROL_byte, KEY_byte]    ' SEND FRAME BACK TO PC
+             HSerOut [CONTROL_byte, DATA_byte]
+
+        Case 11 'Set PHY power on / off (data 1/0)
+              If DATA_byte = 1 Then
+                PHY_Enable = 1   'LAT
+                PHY_Power = 1  'variable
+              Else If DATA_byte = 0 Then
+                PHY_Enable = 0
+                PHY_Power = 0
+              End If
+
+              GoSub Make_HEF_Array
+              HEF_Array[2] = PHY_Power
+              GoSub Write_HEF   'store it
+
+        Case 12    ' Frame 12  get F/W.  replies with Frame 13 with data byte = ver index
+             DATA_byte = 101 'Firmware_Index      'set as constant . 156 choices. start from 100, interpreted in app as desired
+             HSerOut [13, DATA_byte]    'frame 13 reply
+
+        Case 14  'FRAME 14 LCU POWER OFF
+            'isolate rx before power off
+             WPU_ATTEN_INF = 0
+             WPU_ATTEN_6 = 0
+             WPU_ATTEN_12 = 0
+
+            ONOFF = 0       ' power off
+            LED = 0         ' LED off
+
+       Case 15    ' Frame 15 kick into BL mode
+
+            Asm                 'Jump to start of bootloader code
+            Clrf INTCON
+            Movlp 0x1e
+            GoTo 0x600          'effectively alter prog ctr to 1E00  (boot lives at 1E00 to 1EFF)
+            EndAsm
+
+       Case 16   ' Set Delay Index   Reply with 17
+            Delay_Index = DATA_byte
+
+            GoSub Make_HEF_Array
+            HEF_Array[1] = Delay_Index
+            GoSub Write_HEF       ' save it
+
+            GoSub Get_Delay_Actual  ' convert index to actual delay value
+
+            'send ACK
+            DATA_byte = CRead (HEF_Address  + 1)         ' read back Delay Index
+            HSerOut [17, DATA_byte]           'frame 17 reply
+CFG:
+        Case 18 'Request Delay Index. Reply with 17
+
+            DATA_byte = CRead (HEF_Address  + 1)         ' read back Delay Index
+            HSerOut [17, DATA_byte]     'frame 17 reply
+
+        Case 19  'FRAME 19 set CIU MODE temporarily to CFg
+                If DATA_byte = 1   Then
+                    CH9121_CFG = 1 'CFG mode  - ground CH CFG pin
+                     RC1STA.4 = 0  ' SREN = 0    DISABLE SERIAL PORT
+                     DelayMS 1000   '1 sec delay for CH to report
+                     CH9121_CFG = 0 'Drop CFG mode  - raise CH CFG pin
+                     RC1STA.4 = 1  ' SREN = 1    RE-ENABLE SERIAL PORT
+                Else
+                    CH9121_CFG = 0
+                End If
+
+       Case 20  'Frame 20 Server status poll pre-link
+             DATA_byte = 0
+             HSerOut [21, DATA_byte] 'frame 21 reply
+
+       Case 24   'read PHY enable status from HEF
+             If DATA_byte = 1 Then    'command validation byte
+                DATA_byte = CRead (HEF_Address  + 2) 'read PHY on/off  1=on
+                HSerOut [25, DATA_byte] 'frame 25 reply
+             End If
+       Case 28  'Read ADC for 13.8 Volts
+            GoSub Read_ADC
+            HSerOut [29, ADC_Byte]    'frame 29 reply
+
+      Case 37  'Set QuietStep
+        If DATA_byte = 255 Then    'just read existing value and reply #38
+            DATA_byte = CRead  (HEF_Address  + 5)
+            Quiet_Step = DATA_byte   'might as well refresh it
+            HSerOut [38, DATA_byte]   'frame 38 reply
+        Else
+            GoSub Make_HEF_Array
+            HEF_Array[5] = DATA_byte
+            Quiet_Step = DATA_byte
+            GoSub Write_HEF
+            HSerOut [38, DATA_byte]   'frame 38 reply
+        End If
+     End Select
+
+    If ONOFF = 1 Then LED = 1       ' LED on
+
+Return
+
+
+'*****************************************************************************
+'                  Sub routines
+'*****************************************************************************
+
+
+'     FVRCON = %10001100          ' FVR enabled, 2.048 V
+'     ADCON0 = %01001001          ' Define ADC channel as RC2 and ENable ADC (bit 0)
+'     ADCON1 = %01100000          ' LEFT justified, Fosc/64 (2us), VREf+ = Vdd  .11 = FVR
+
+Read_ADC:
+        ADCON0.1 = 1       'START ADC GO/DONE
+        'LED = 0
+        DelayMS 1
+        Repeat : Until ADCON0.1 = 0     'wait for ADC to finish  ( = 0)
+        ADC_Byte = ADRESH
+        'aDC_BYTE = (ADC_BYTE - 50)* 2
+        'DelayMS 100
+        'LED = 1
+        'ADC_Full = ADIn 0
+        'ADC_Byte = ADC_Full.HIGHByte
+Return
+
+(*Check_IO_And_Alarms:
+
+    'build next data byte
+    DATA_byte = 0  ' clear var
+    If AUX1_IN = 0 Then DATA_byte = (DATA_byte + %00000001)
+    If AUX2_IN = 0 Then DATA_byte = (DATA_byte + %00000010)
+    If VOLTS_Det = 1 Then DATA_byte = (DATA_byte + %00001000) : ONOFF = 0   ' auto power off
+    'If VOLTS_Lo = 1 Then DATA_byte = (DATA_byte + %00000100) : ONOFF = 0
+    If FUSE = 0 Then  DATA_byte = (DATA_byte + %00010000) : ONOFF = 0   ' auto power off (fuse inverted)
+
+    If FUSE = 0 Or VOLTS_Det = 1 Then    ' if volts or current alarm tripped
+        led_count = led_count + 1
+        If led_count = 50 Then       ' after 50 x 10 ms counts
+            led_count = 0            ' reset counter
+            If LED = 0 Then          ' toggle LED
+                LED = 1
+            Else  LED = 0
+            End If
+        End If
+    Else led_count = 0               'keep count at zero until alarm
+        If ONOFF = 0 Then LED = 0    ' make sure led is off when exiting alarm is unit is off
+    End If
+
+    ' Any changes?
+    If DATA_byte <> DATA_byte_Old Then  'something's changed so tx back to PC
+        DATA_byte_Old = DATA_byte    ' store to compare with next ' next data byte
+    'check for PTT enabled on CH1
+        'If (IO_config_byte & %00000100) = %00000100 Then
+        If Chan_1_PTT_Set = 1 Then   ' if PTT in enabled on channel 1 (bit 2 of IO config)
+            If AUX1_IN = 0 Then
+                 DATA_byte = 127  ' single byte mute code
+                SerOut MOD,4980,[DATA_byte]  ' send to LCU
+            elseIf AUX1_IN = 1 Then
+                 DATA_byte = 128  ' single byte un-mute code
+                SerOut MOD,4980,[DATA_byte]  ' send to LCU
+            end if
+        end if
+
+        CONTROL_byte = %00000011 ' FRAME TYPE 3
+        KEY_byte = Random
+        enc_DATA_byte = DATA_byte ^ KEY_byte       ' re-encrypt reply
+        enc_CONTROL_byte = CONTROL_byte ^ KEY_byte
+        HSerOut [enc_DATA_byte, enc_CONTROL_byte, KEY_byte]    ' SEND FRAME BACK TO PC
+    End If*)
+
+
+
+Return
+
+Make_HEF_Array:
+        'read HEF into array
+        For i = 0 UpTo 63       ' get the 64 bytes from the HEF block
+            HEF_Array[i] = CRead (i + $1F80)    'block starts at 1F80
+        Next
+Return
+
+'===============================================================
+
+Write_HEF:
+'    For i = 0 UpTo 63       ' get the 64 bytes from the HEF block
+'        HEF_Array[i] = CRead (i + $1F80)    'block starts at 1F80
+'    Next
+
+    'Modify data in the buffer
+'        HEF_Array[0] = IO_config_byte
+'        HEF_Array[1] = Delay_Index
+'        HEF_Array[2] = PHY_Power
+'        HEF_Array[3] = ADC_Lower
+'        HEF_Array[4] = ADC_Upper
+'        HEF_Array[5] = Quiet_Step
+'        HEF_Array[6] = 0 'Under-Volt log
+'        HEF_Array[7] = 0 'Over-Volt log
+'        HEF_Array[8] = 0 'Current Trip log
+
+    'Erase the HEF block
+    ' it must be erased before re-writing, and write done in blocks
+    CErase $1F80
+    DelayMS 20
+
+    'Write back modified data to HEF block
+    For i = 0 UpTo 63
+        CWrite (HEF_Address + i), [HEF_Array[i]]
+    Next
+    DelayMS 20
+Return
+'===============================================================
+
+Send_PC_Reply:
+
+    'Compose reply
+    CONTROL_byte = 3
+    DATA_byte = %00000000 ' clear data byte before new values
+    'If FUSE = 0 Then  DATA_byte = (DATA_byte + %00010000)     'Fuse inverted
+    'If VOLTS_Det = 1 Then DATA_byte = (DATA_byte + %00001000)
+'    'If VOLTS_Lo = 1 Then DATA_byte = (DATA_byte + %00000100)
+    If AUX2_IN = 0 Then DATA_byte = (DATA_byte + %00000010)
+    If AUX1_IN = 0 Then DATA_byte = (DATA_byte + %00000001)
+
+     HSerOut [CONTROL_byte, DATA_byte]    'Send reply to PC
+Return
+'===============================================================
+
+
+CHANGE_IO:
+'Data byte key:
+
+    IO_config_byte = CRead HEF_Address
+
+'    'OmnirigBuffer = LATC   ' get current IO state
+
+'    If IO_config_byte.5 = 1 And IO_config_byte.1 = 1 Then     ' both set to Control
+
+'        If DATA_byte.0 = 1 Then   'channel 1 out
+'            OmnirigBuffer = OmnirigBuffer | %10000000        'aux1 C7 force to 1
+'        Else  OmnirigBuffer = (OmnirigBuffer & %01111111)   'force to 0
+'        EndIf
+
+'        If DATA_byte.1 = 1 Then   'channel 2  out
+'            OmnirigBuffer = OmnirigBuffer | %00010000        'aux2 C4
+'        Else  OmnirigBuffer = (OmnirigBuffer & %11101111)   'force to 0
+'        EndIf
+'    Else If IO_config_byte.5 = 1 And IO_config_byte.1 = 0 Then  'channel 2 only
+'        If DATA_byte.1 = 1 Then   'channel 2  out
+'            OmnirigBuffer = OmnirigBuffer | %00010000        'aux2 C4
+'        Else  OmnirigBuffer = (OmnirigBuffer & %11101111)   'force to 0
+'        EndIf
+'    Else If IO_config_byte.5 = 0 And IO_config_byte.1 = 1 Then   'channel 1 only
+'        If DATA_byte.0 = 1 Then   'channel 1 out
+'            OmnirigBuffer = OmnirigBuffer | %10000000        'aux1 C7 force to 1
+'        Else  OmnirigBuffer = (OmnirigBuffer & %01111111)   'force to 0
+'        EndIf
+'    End If
+
+'    LATC = OmnirigBuffer         'set both together so interrupt doesn't miss one of them
+
+    If IO_config_byte.1 = 1 Then          ' CH1 configured as AUX
+            AUX1_OUT = DATA_byte.0
+    End If
+
+    If IO_config_byte.5 = 1 Then          ' CH2 configured as AUX
+            AUX2_OUT  = DATA_byte.1
+    End If
+
+    Return
+
+'=====================================================================
+'TYPE 4  I/O / VOLTS / FUSE READ
+GET_IO:
+    'DelayMS 10
+    'KEY_byte = Random
+    DATA_byte = 0
+    'If VOLTS_Det = 1 Then DATA_byte = %00001000
+'    'If VOLTS_Lo = 1 Then DATA_byte = (DATA_byte + %00000100)
+   ' If FUSE = 0 Then  DATA_byte = (DATA_byte + %00010000)     'Fuse inverted
+    If AUX1_IN = 0 Then DATA_byte = DATA_byte | %00000001
+    If AUX2_IN = 0 Then DATA_byte = DATA_byte | %00000010
+    'enc_DATA_byte = DATA_byte ^ KEY_byte
+    CONTROL_byte = %10000000
+    'enc_CONTROL_byte = CONTROL_byte ^ KEY_byte
+    'HSerOut [enc_DATA_byte, enc_CONTROL_byte, KEY_byte]   ' send status back to PC
+     HSerOut [CONTROL_byte, DATA_byte]
+Return
+
+'=====================================================================
+
+Handle_Type_1:
+    'NEW Mute code 122. Un-mute 123
+    'test for 500 kHz filter - for QS Auto: (QS = 2) AND 500 khz filter in
+    ' byte can only be 90 or 91
+    If DATA_byte = 90 Or DATA_byte = 91 Then    ' two possibilities for 500k filter
+       Flg_QS = 1
+    ElseIf DATA_byte > 87 And DATA_byte < 102 Then   'rest of possibilities for filter/pre values
+       Flg_QS = 0
+    End If
+
+    If DATA_byte = 122 Then    'atten state for mute
+    '   PUSH LAST ATTEN STATE
+        OLD_WPU_ATTEN_INF  = WPU_ATTEN_INF
+        OLD_WPU_ATTEN_12 = WPU_ATTEN_12
+
+        WPU_ATTEN_INF = 0        ' off means function is active
+        WPU_ATTEN_12 = 0
+        SerOut MOD,4980,[122]   '200 bps to LCU
+        Return
+     Else If  DATA_byte = 123 Then 'recover previous atten state on un-mute
+        WPU_ATTEN_INF = OLD_WPU_ATTEN_INF
+        WPU_ATTEN_12 = OLD_WPU_ATTEN_12
+        SerOut MOD,4980,[123]   '200 bps to LCU
+        Return
+    End If
+
+    If DATA_byte < 104 Or DATA_byte > 121 Then
+        '4980 for 200 bps, 2480 for 400 bps, 3313 for 300 bps
+        SerOut MOD,4980,[DATA_byte]   '200 bps to LCU
+
+        If Quiet_Step = 1 Then    'could be 1 (on) or 2 (auto).
+            'relay noise mute
+            LATA.0 = 1
+            DelayMS 8
+            LATA.0 = 0
+        ElseIf  Quiet_Step = 2 And Flg_QS = 1 Then  'QS = 2 is Auto mode. needs QS flag, set by 500 kHz filt inline
+            'relay noise mute
+            LATA.0 = 1
+            DelayMS 8
+            LATA.0 = 0
+        End If
+
+    ElseIf DATA_byte > 103 Then      ' IF >= 104 MUST BE ATTEN if fails first test
+        GoSub Handle_Atten
+    End If
+
+    HSerOut [33, 1]         'ACK to Type 1
+Return
+         
+'=====================================================================
+Handle_Atten:
+
+  'Atten bits
+    If DATA_byte = 104 Then     '0 dB
+
+         WPU_ATTEN_INF = 1        ' ra1 off means function is active
+         WPU_ATTEN_6 = 1          ' ra3
+         WPU_ATTEN_12 = 1         ' ra2
+
+    Else If DATA_byte = 106 Then  '-6
+
+         WPU_ATTEN_INF = 1        ' off means function is active
+         WPU_ATTEN_6 = 0
+         DelayMS 5
+         WPU_ATTEN_12 = 1
+
+    Else If DATA_byte = 108 Then  ' -12
+
+         WPU_ATTEN_INF = 1        ' off means function is active
+         WPU_ATTEN_12 = 0
+         DelayMS 5
+         WPU_ATTEN_6 = 1
+
+    Else If DATA_byte = 110 Then  ' -18
+
+         WPU_ATTEN_INF = 1        ' off means function is active
+         WPU_ATTEN_6 = 0
+         WPU_ATTEN_12 = 0
+
+    Else If DATA_byte = 118 Then ' infinity
+
+         WPU_ATTEN_INF = 0        ' off means function is active
+         WPU_ATTEN_6 = 0
+         WPU_ATTEN_12 = 0
+
+    End If
+Return
+
+Get_Delay_Actual:
+    ' Turns delay index into actual value
+    Select Case Delay_Index
+        Case 0
+            Delay_actual = 0
+        Case 1
+            Delay_actual = 0    '50 ms
+        Case 2
+            Delay_actual = 50   '100 ms
+        Case 3
+            Delay_actual = 100  '150 ms
+        Case 4
+            Delay_actual = 145  '200 ms
+        Case 5
+            Delay_actual = 150
+        Case 6
+            Delay_actual = 250     ' max 255 : 8 bits
+'        Case 7
+'            Delay_actual = 450
+       Case Else
+            Delay_actual = 0
+    End Select
+Return
+
+
+   '****************** SEND ON INTERRUPT ****************************
+TIMEOUT1: ' called every 10 ms. Normally only flashes LED until interrupt occurs from AUX1_IN, 13.8V or Fuse.
+
+
+
+   GoTo Main
+   ' ******************* LED FLASH SUB ******************************
+'LED_flash:    ' called from timeout sub
+
+
+'    'determine flash rate from exception
+
+'    If VOLTS = 1 Then                  ' VOLTS = 1 = no 12V
+'        LEDonseed = 50 : LEDoffseed = 50
+'    Else If VOLTS = 0 And FUSE = 1 Then ' FUSE = 1 = fuse blown
+'        LEDonseed = 20 : LEDoffseed = 20
+'    Else If ONOFF = 0 Then
+'        LED = 0
+'        Return 'LEDonseed = 0 : LEDoffseed = 50
+'    Else LED = 1 : Return                       ' steady LED if no exceptions
+'    End If
+
+'   ' flash LED
+'   If LED = 0 Then
+'        If LEDoncount > 0 Then
+'            Dec LEDoncount                      ' until zero.
+'        Else
+'            LED = 0                             ' if Zero, LED=off
+'            LEDoncount = LEDonseed              ' and reload on timer
+'            Return
+'        End If
+'   Else                                         '(LED presumed 0)
+'        If LEDoffcount > 0 Then
+'            Dec LEDoffcount                     ' until zero.
+'        Else
+'            LED = 1                            ' if Zero, LED = on
+'            LEDoffcount = LEDoffseed            ' reload off timer
+'        End If
+'   End If
+
+
+'Return
+     '******************* pulse LED when OFF ************************
+'LED_pulse:
+
+'   If led_frame_ctr = 0 Then    ' led back on at end of 256 clock pulses (10 ms calls)
+'    LED = 1   ' blue led on
+'   Else
+'    Inc led_frame_ctr
+'   End If
+
+'    Dec led_count ' increase the time it's on each time sub is called (every 10 ms)
+'   If led_count = 0 Then LED = 0
+'   ' inc led_del
+
+'   ' delay for more and more time per call
+
+'Return
+
+ '********************* stuff 1's between each bit *****************
+
+(* bitstuff_2:
+ 'inputs  DATA_byte
+ 'outputs LCU_BS_1, LCU_BS_2
+
+  LCU_BS_1 = $FF : LCU_BS_2 = $FF       'set values   (1 = '0')
+
+  'first byte DATA_byte > convert to two bytes LCU_BS_1, LCU_BS_2
+  LCU_BS_1.1 =  DATA_byte.0
+  LCU_BS_1.3 =  DATA_byte.1
+  LCU_BS_1.5 =  DATA_byte.2
+  LCU_BS_1.7 =  DATA_byte.3
+  LCU_BS_2.1 =  DATA_byte.4
+  LCU_BS_2.3 =  DATA_byte.5
+  LCU_BS_2.5 =  DATA_byte.6
+  LCU_BS_2.7 =  DATA_byte.7
+
+  Return*)
+ '*************************************************
+
+  GoTo Main
+
+  'ORG $1600
+
+'Test:
+        'DATA_byte.0 =DATA_byte.0
+'return

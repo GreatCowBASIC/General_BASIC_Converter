@@ -1,0 +1,309 @@
+'***************************************************************
+'*  Name    : dec 10 tidyup and test                            *
+'*  Author  :                                                   *
+'*  Notice  :                                                   *
+'*          :                                                   *
+'*  Date    : 12/12/2007                                        *
+'*  Version : 0.0                                               *
+'*  Notes   : fixed previous pb and freq set errors             *
+'*          :                                                   *
+'*          :                                                   *
+'*          :                                                   *
+'****************************************************************
+    Device = 18F1220
+    Xtal = 20
+      DelayMS 100                         ' settle
+#option explicit
+    ' Startup settings
+    Dim low_ctr As Byte            ' image or TMR0L for detecting carry out of prescaler
+    Dim toggles As Byte            ' number of toggles required to extract prescaler value
+    Dim scaler_count As Byte       ' recovered value in prescaler
+    Dim ctr_val As Dword           ' 32 bit count reference
+    Dim ee_ctr_val As Dword        ' holder for ctr_val - 50 as written to eeprom
+    Dim prev_ctr_val As Dword      ' last value of ctr_val to trap big variations eg half count
+    Dim cur_mem As Byte            ' holds current memory (0-4)
+    Dim standby_mode As Byte       ' 1 = power save short gate
+    Dim ee_offset As Byte          ' index for eeprom values
+    Dim start_mem As Byte          ' store last used mem for restart on same one
+    Dim netchannel As Dword        ' store the current target frequency
+    Dim errorfreq As Dword         ' difference between count and target freq
+    Dim led_to_flash As Byte       ' array of portb.0 - 4 for led lighting
+    Dim loop_count As Byte         ' counter for flashing currrent mem led in stby
+    Dim pb_ctr As Byte             ' counter for power-off timing
+    Dim on_timer As Word           ' counter for auto power off
+    Dim on_timer_value As Word     ' start value
+    Declare LCD_CommandUs 255      ' lcd delay
+    Declare LCD_DataUs 255         '  "
+
+'    Symbol led0 = LATB.2
+'    Symbol led1 = LATB.3
+'    Symbol led2 = LATB.0
+'    Symbol led3 = LATB.5
+'    Symbol led4 = LATB.7
+    Symbol PB1 = PORTA.2
+    Symbol Suicide_pin = LATA.3      ' keep alive power pin
+    Symbol count_enable = LATA.1           ' input enable ~ shorts out input for toggling
+    Symbol amp_enable = LATA.0           ' High enables LM319 by earthing 0V pins via BC184
+
+restart:
+    ADCON1 = %11111111               ' set A/D pins to digital
+    TRISA = %11110100                ' set A/0,1,3 to output
+    TRISB = %01010010                ' define I/O on PORTB
+    T0CON = %10110011                ' set 16 bit count mode, assign prescaler modulus 16
+    T1CON = %10000010                ' T1 16 bit no prescaler async counter , set to off
+
+    'OSCCON = %10000010
+    Symbol TMR1ON = T1CON.0          ' T1 counter enable
+    Symbol SWDTEN = WDTCON.0         ' software enabled watchdog timer
+
+    'start values for variables / flags
+    TMR1ON = 0
+    SWDTEN = 0
+    Suicide_pin = 0                  ' PB1 start~PB1 puts volts on PIC via transistor
+    Clear amp_enable                     ' define power to LM319
+    prev_ctr_val = 0
+    on_timer = 0
+    on_timer_value = 1000
+    standby_mode = 1
+    loop_count = 16                  ' one over 15 for first dec to trigger flash
+
+    If PB1 = 1 Then                  ' denotes power up using PB
+        LATB = 255                   ' startup fairy light show
+        on_timer = on_timer_value    ' set timeout period
+        Suicide_pin = 1              ' take over power control
+    End If
+
+     While PB1 = 1                    ' hold until PB button released
+     DelayMS 10                       ' primitive debounce
+     Wend
+     LATB = 0 : DelayMS 200 : LATB = 255 : DelayMS 400 : LATB = 0  ' cosmetic startup delay
+ee_restart:
+    cur_mem = ERead 20               ' get the last current memory from eeprom
+    If cur_mem > 4 Then cur_mem = 2  ' avoid bad memory value on initial use
+    If cur_mem = 0 Then              ' sync led to flash
+          led_to_flash = 4           ' define led states
+    Else If cur_mem = 1 Then
+          led_to_flash = 8
+    Else If cur_mem = 2 Then
+          led_to_flash = 1
+    Else If cur_mem = 3 Then
+          led_to_flash = 32
+    Else If cur_mem = 4 Then
+          led_to_flash = 128
+    End If
+    netchannel = ERead cur_mem * 4   ' use the cur_mem index to get the actual freq
+
+'#####################################################
+'#####   MAIN LOOP .... >>>     ######################
+'#####################################################
+
+mainloop:
+
+    ' push button handling
+    If on_timer = 1 Then                   ' auto power off sequence
+        LATB = 173
+        DelayMS 300
+        Suicide_pin = 0
+        on_timer = 0
+    End If
+
+    If standby_mode = 1 Then                                       ' button options are: change channel (short press)
+                                           ' or power off (suicide pin + long press)
+         pb_ctr = 0                        ' incrementer for pb loop count
+
+         While PB1 = 1                     ' button pressed
+             DelayMS 10                    ' wait 10ms
+             Inc pb_ctr                    ' button loop counter
+                 If pb_ctr > 150 Then
+                    If Suicide_pin = 1 Then
+                       LATB = 255              ' leds on as goodbye wave
+                       While PB1 = 1 : Wend    ' hold until released
+                       'LATB = 0
+                       DelayMS 200             ' cosmetic delay
+                       LATB = 173
+                       DelayMS 600
+                       LATB = 41
+                       DelayMS 600
+                       LATB = 1
+                       DelayMS 600
+                       LATB = 0
+                       DelayMS 300
+                       LATB = 173
+                       DelayMS 100
+                       LATB = 0
+                       Suicide_pin = 0         ' > 1 sec press
+                       GoTo restart            ' catchall
+                    Else While PB1 = 1 : Wend  ' hold until key released
+                    GoTo chng_chan             ' chan chng on long press / no suicide
+                    End If
+             End If
+         Wend
+
+         If pb_ctr>0 Then                  ' means pb pressed, and for < 1 sec
+            GoTo chng_chan
+         End If
+    Else If PB1 = 1 Then
+        DelayMS 300                            ' cosmetic pb delay then recheck pb
+        If PB1 = 1 Then                        ' store only if button still held
+             LATB=0
+             ee_offset = cur_mem * 4           ' DWORD variables use 4 bytes
+             ee_ctr_val = ctr_val - 50
+             EWrite ee_offset,[ee_ctr_val]     ' 500 hz offset
+              netchannel = ee_ctr_val          ' update the current reference
+        End If
+        LATB = 0                               ' clear all leds
+        DelayMS 200
+        LATB = 41     '01110
+        While PB1 = 1  : Wend                  ' hold here after flash if PB still pressed
+    End If
+
+ PBresume:
+    TMR0H = 0                              ' zero the T0 High counter
+    TMR0L = 0                              ' zero the T0 Low counter
+
+    '###############################################################################
+    '      STANDBY MODE : enable count for 5mSec then test for signal
+    '      otherwise COUNT_MODE : 100mS gate, then obtain total count inc prescaler
+    '###############################################################################
+    If standby_mode = 1 Then
+        TRISA = %11110110                    ' enable counter input by removing s/c
+        Set amp_enable                       ' power up amp
+        DelayMS 5                            ' short sample just to see if any carrier there
+        'TRISA = %11110100                   ' no need to stop count  - saves power without doing so
+        Clear amp_enable                     ' power off amp
+        ctr_val = 0                          ' clear previous value
+        ctr_val = TMR0H                      ' get high byte
+        ctr_val = ctr_val + TMR0L            ' collate timer counts (no need to scale correctly)
+        If ctr_val > 5 Then                  ' see if any counts present
+           standby_mode = 0                  ' if yes, come out of standby
+           Set amp_enable
+           DelayMS 5                         ' settle
+           GoTo mainloop                     ' go round again
+        End If
+        SWDTEN = 1                           ' enable WDT
+        Sleep                                ' WDT based loop delay (postscaler must be set to 32)
+        SWDTEN = 0                           ' disable WDT
+
+   Else TMR1L = 0                            ' zero T1 Low (mod clip ctr)
+        TRISA = %11110110                    ' enable counter T0 input by removing s/c
+        DelayMS 5                            ' delay past mod clip gate spike (2mS)
+        TMR1ON = 1                           ' start the mod clip counter T1
+        DelayMS 95                           ' gate time    (100mS nominal for 10Hz res.)
+
+        TRISA = %11110100                    ' set A.1 to output to stop count
+        TMR1ON = 0                           ' stop the mod clip counter
+        If TMR1L > 0 Then standby_mode = 1: GoTo PBresume       ' abort the cycle if mod clip detected
+        'now get the hidden prescaler value
+        low_ctr = TMR0L                      ' store TMR0L
+        toggles = 0
+        scaler_count = 0
+
+        While  low_ctr = TMR0L               ' check if TMR0L = stored value
+            Set count_enable                       ' toggle enable to
+            Clear count_enable                     ' add 1 to prescaler count  (toggles)
+            Inc toggles                      ' increment toggle count
+        Wend
+
+        scaler_count = 16 - toggles                  ' derive value in prescaler
+        scaler_count = scaler_count & %00001111      ' clean up high nibble
+        ctr_val = 0
+        ctr_val = TMR0H * 4096                       ' add in high timer byte (read loads low timer byte to latch)
+        ctr_val = ctr_val + TMR0L * 16               ' add in low timer byte
+        ctr_val = ctr_val + scaler_count             ' final value of counter
+    End If
+
+
+    '#######################################################################
+    ' decide what to do based on final count value : ctr_val
+    '#######################################################################
+    If ctr_val < 50 Then                         ' should be zero with no false triggers
+        LATB = 0                                 ' clear leds when on stby
+        standby_mode = 1
+        Dec loop_count                           ' for led flashing
+        If loop_count = 0 Then
+           loop_count = 13                       ' reset flash counter
+           LATB = led_to_flash
+           If on_timer > 1 Then Dec on_timer     ' auto power off timeout countdown
+        End If
+    Else If ctr_val < prev_ctr_val - 499 Then    ' mask partial end counts >
+        prev_ctr_val = ctr_val                   ' assumption that freq won't change ~                            ' by 4990hz/100mSec otherwise ~
+        standby_mode = 1
+    Else If ctr_val < netchannel Then            ' netchannel is 500hz low of target freq
+        loop_count = 3                           ' reset flash counter                         ' bring  out of  stby
+        standby_mode = 0
+        prev_ctr_val = ctr_val                   ' store the last value
+        LATB = 4           '10000
+    Else errorfreq = ctr_val - netchannel        ' get freq error
+        loop_count = 3                           ' reset flash counter
+        standby_mode = 0                          ' bring out of stby
+        prev_ctr_val = ctr_val                   ' store the last value
+
+        Select Case errorfreq                    ' light leds based on freq error
+            Case 46 To 55
+                 LATB = 41     '01110
+            Case 56 To 60
+                 LATB = 33     '00110
+            Case 41 To 45
+                 LATB = 9      '01100
+            Case 26 To 40
+                 LATB = 8      '01000
+            Case 61 To 75
+                 LATB = 32      '00010
+            Case 0 To 25
+                 LATB = 12      '11000
+            Case 76 To 99
+                 LATB = 160     '00011
+            Case > 99
+                 LATB = 128     '00001
+        End Select
+    End If
+
+    GoTo mainloop                   ' next loop (approx 100mSec cycle)
+
+
+ '############## END OF MAINLOOP #################################
+
+'############################################################################################
+'############################################################################################
+chng_chan:                                 ' Change memory channel  (on stby)
+     If cur_mem = 0 Then
+          cur_mem = 1                      ' round robin led 0-4
+          led_to_flash = 8                 ' define led states
+     Else If cur_mem = 1 Then
+          cur_mem = 2
+          led_to_flash = 1
+     Else If cur_mem = 2 Then
+          cur_mem = 3
+          led_to_flash = 32
+     Else If cur_mem = 3 Then
+          cur_mem = 4
+          led_to_flash = 128
+     Else If cur_mem = 4 Then
+          cur_mem = 0
+          led_to_flash = 4
+     End If
+     EWrite 20, [cur_mem]                  ' save current mem # for restart
+     netchannel = ERead cur_mem * 4        ' get the new reference freq
+
+     Dim ledloop As Byte
+     ledloop = 7
+
+      Repeat
+          DelayMS 50
+          LATB = led_to_flash              ' light target led
+          DelayMS 50
+          LATB = 0                         ' clear all leds
+          Dec ledloop
+          If PB1 = 1 Then GoTo chng_chan
+      Until ledloop = 0                    ' repeat n times
+
+     GoTo mainloop
+
+
+'##########################################################################################
+'##############################  END END END  #############################################
+'##########################################################################################
+
+
+
+
