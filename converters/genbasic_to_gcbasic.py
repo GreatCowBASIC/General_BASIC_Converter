@@ -246,7 +246,7 @@ RE_DIM_ARRAY_BRACKET = re.compile(r'^\s*Dim\s+(\w+)\s*\[', re.IGNORECASE)
 
 # After the bracket->paren rewrite above, flag (and strip) any trailing
 # word after "Dim NAME(...) As TYPE" that isn't a documented GCBASIC Dim
-# modifier (Alias / At / = initialvalue) - e.g. the BASIC-Photon
+# modifier (Alias / At / = initialvalue) - e.g. the BASIC
 # "Heap" qualifier, which has no GCBASIC equivalent and is not guessed at.
 RE_DIM_TRAILING_TOKEN = re.compile(
     r'^(\s*Dim\s+\w+\(\s*[^)]*?\s*\)\s*As\s+\w+)\s+(\S.*?)\s*$', re.IGNORECASE
@@ -369,7 +369,7 @@ else:
     CONVERTER_OS = platform.system()
 
 HEADER_TEMPLATE = """'****************************************************************
-'*  PHOTON to GCBASIC Converted ({date} ({os}) : Build {build}) *
+'*  GENERAL BASIC to GCBASIC Converted ({date} ({os}) : Build {build}) *
 '*  Source file : {source_name}
 '*                                                                *
 '*  This is a HEURISTIC, line-based conversion. It has NOT been  *
@@ -467,7 +467,7 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
 
     # Dim NAME(SIZE) As TYPE <trailing> - flag/strip any trailing word
     # that isn't a recognized GCBASIC Dim modifier (Alias/At/=), e.g. the
-    # BASIC-Photon "Heap" qualifier, which has no known GCBASIC
+    # BASIC "Heap" qualifier, which has no known GCBASIC
     # equivalent and is not guessed at.
     m = RE_DIM_TRAILING_TOKEN.match(code_line)
     if m:

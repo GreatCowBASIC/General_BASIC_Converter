@@ -1,0 +1,719 @@
+'****************************************************************
+'*  GENERAL BASIC to GCBASIC Converted (2026-08-07 (Windows 64 bit) : Build 1617) *
+'*  Source file : protonexample2.prt
+'*                                                                *
+'*  This is a HEURISTIC, line-based conversion. It has NOT been  *
+'*  compiled or tested. Search for '>>> REVIEW:' comments below  *
+'*  for anything the converter was not confident about, and      *
+'*  compile with the real GCBASIC toolchain before flashing.     *
+'****************************************************************
+
+' NOTE: the following Symbol constant(s) were renamed because
+' their BASIC name collides with a GCBASIC reserved
+' math/logic operator - every use in this file was updated:
+'   MOD  ->  CONVERT_ADAPTED_MOD
+
+'HEF (Hybrid EEPROM/Flash) memory is used in this file - not
+'every chip defines ChipHEFMemWords directly, so fall back to
+'ChipSAFMemWords when it's missing.
+#script
+    If NODEF(ChipHEFMemWords) Then
+        If DEF(ChipSAFMemWords) Then
+            ChipHEFMemWords = ChipSAFMemWords
+        End If
+    End If
+#endscript
+
+'Software serial (Ser1) - enabling constants required by
+'GCBASIC's Ser1Send/Ser1Receive (see SerNSend/SerNReceive docs).
+'Baud derived from the original SerOut/SerIn baudmode using the
+'formula this source documents in its own comments: baud =
+'1000000 / (baudmode + 20) - verify against the target device.
+#include <SoftSerial.h>
+#define SER1_BAUD 200
+#define SER1_TXPORT LATA
+#define SER1_TXPIN 4
+
+'Hardware USART - enabling constants required by GCBASIC's
+'HSerSend/HSerReceive (see RS232 Hardware Overview / HSerSend docs).
+'(inserted just after '#define Hserial_Baud' below)
+
+//#chip 16F15355, 32
+#define Optimiser_Level 0
+#define Bootloader OFF
+
+#define EEPROM_Size 64
+#define EEPROM_Address 0x1F80
+Dim HEF_Array(64) As Byte  ' >>> REVIEW: removed trailing 'Heap' from this Dim - not a recognized GCBASIC Dim option (Alias/At/=), and its intended purpose in the original source is unclear; add the correct GCBASIC equivalent (e.g. 'At location') if needed
+Dim i As Byte
+
+#Config FEXTOSC_OFF, RSTOSC_HFINT32, CLKOUTEN_OFF, CSWEN_OFF, FCMEN_OFF
+#Config MCLRE_OFF, PWRTE_OFF, LPBOREN_OFF, BOREN_ON, BORV_HI, ZCD_OFF, PPS1WAY_OFF, STVREN_ON
+#Config WDTCPS_WDTCPS_31, WDTE_OFF, WDTCWS_WDTCWS_7, WDTCCS_SC
+#Config BBSIZE_BB512, BBEN_OFF, SAFEN_ON, WRTAPP_OFF, WRTB_OFF, WRTC_OFF, WRTSAF_OFF, LVP_OFF
+#Config CP_OFF
+
+
+
+
+     ANSELA = 0b00000000
+     TRISA = 0b00001110
+     ODCONA = 0b00000000
+     ANSELB = 0b00000000
+     TRISB = 0b00001001
+     ODCONB = 0b00000000
+
+     WPUB.3 = 1
+
+     ODCONC = 0b00000000
+     ANSELC = 0b00000100
+     TRISC = 0b10100101
+
+     PORTE.3 = 1
+
+     FVRCON = 0b10001111
+     ADCON0 = 0b01001001
+     ADCON1 = 0b00110011
+
+    #define LED LATB.2
+    #define CONVERT_ADAPTED_MOD LATA.4
+    #define ONOFF LATC.1
+
+    #define ATTEN_INF LATA.1
+    #define WPU_ATTEN_INF WPUA.1
+
+    #define ATTEN_12 LATA.2
+    #define WPU_ATTEN_12 WPUA.2
+
+    #define ATTEN_6 LATA.3
+    #define WPU_ATTEN_6 WPUA.3
+
+
+    #define AUX1_IN PORTB.0
+    #define AUX2_IN PORTC.7
+    #define AUX1_OUT LATB.1
+    #define AUX2_OUT LATC.4
+
+    #define PHY_Enable LATA.5
+    #define CH9121_CFG LATA.7
+
+    Dim OmnirigBuffer As Byte
+    Dim HEF_Address As Word = 0x1F80
+    Dim Serno As String *8
+    Dim enc_CONTROL_byte As Byte
+    Dim DATA_byte As Byte
+    Dim DATA_byte_Old As Byte
+    Dim Delay_Index As Byte
+    Dim CONTROL_byte As Byte
+    Dim enc_DATA_byte As Byte
+    Dim LCU_BS_1 As Byte
+    Dim LCU_BS_2 As Byte
+    Dim KEY_byte As Byte
+    Dim led_count As Byte
+    Dim ATTEN_BYTE As Byte
+    Dim Delay_actual As Byte
+    Dim IO_config_byte As Byte
+    Dim Chan_1_PTT_Set As Bit Alias IO_config_byte.2
+    Dim CH1 As Byte
+    Dim CH1_IO_Cfg As Byte
+    Dim CH2 As Byte
+    Dim CH2_IO_Cfg As Byte
+    Dim PHY_Power As Byte
+    Dim ADC_Byte As Byte
+    Dim ADC_Full As Word
+    Dim Loop_Count As Byte
+
+    Dim OLD_WPU_ATTEN_INF  As Byte
+    Dim OLD_WPU_ATTEN_6  As Byte
+    Dim OLD_WPU_ATTEN_12  As Byte
+    Dim Atten_Prev As Byte
+
+    Dim Flg_PTT As Byte
+    Dim Flg_QS As Byte
+
+    Dim IO_State As Byte
+    Dim Old_IO_State As Byte
+
+    Dim Old_Aux1_In As Byte
+    Dim Old_Aux2_In As Byte
+
+    Dim Send_Byte As Byte
+
+    Dim ADC_Lower As Byte
+    Dim ADC_Upper As Byte
+    Dim Quiet_Step As Byte
+    Dim Under_Volt As Byte
+    Dim Over_Volt As Byte
+    Dim Current_Trip As Byte
+
+    AUX1_OUT = 0
+    AUX2_OUT = 0
+    CONVERT_ADAPTED_MOD = 0
+    ONOFF = 0
+    WPU_ATTEN_INF = 0
+    WPU_ATTEN_12 = 0
+    WPU_ATTEN_6  = 0
+    LED = 0
+    Serno = "12345678"
+    Loop_Count = 100
+
+CLC:
+
+    CLC1CON = 0b00000010
+    CLC2CON = 0b00000000
+    CLC3CON = 0b00000000
+    CLC4CON = 0b00000000
+
+    CLCIN0PPS = 0x10
+
+    CLCIN1PPS = 0x07
+
+    CLCIN2PPS = 0x0B
+
+
+    RC6PPS = 0x01
+
+    RA6PPS = 0x02
+
+    RB5PPS = 0x03
+
+    CLC1POL = 0b00000000
+
+    CLC1SEL0 = 0x00
+    CLC1SEL1 = 0x02
+
+    CLC1GLS0 = 0x02
+    CLC1GLS1 = 0x02
+    CLC1GLS2 = 0x08
+    CLC1GLS3 = 0x08
+
+    CLC2POL = 0b00000000
+
+    CLC2SEL0 = 0x02
+    CLC2SEL1 = 0x01
+    CLC2SEL2 = 0x1F
+
+    CLC2GLS0 = 0x02
+    CLC2GLS1 = 0x08
+    CLC2GLS2 = 0x04
+    CLC2GLS3 = 0x20
+
+    CLC3POL = 0b00000000
+
+    CLC3SEL0 = 0x00
+    CLC3SEL1 = 0x01
+    CLC3SEL2 = 0x1F
+
+    CLC3GLS0 = 0x20
+    CLC3GLS1 = 0x04
+    CLC3GLS2 = 0x08
+    CLC3GLS3 = 0x02
+
+
+    CLC1CON = 0b10000010
+
+    CLC2CON = 0b10000000
+
+    CLC3CON = 0b10000000
+
+    LED = 0 : Wait 1500 ms : LED = 1 : Wait 200 ms : LED = 0
+    Wait 200 ms : LED = 1 : Wait 500 ms : LED = 0: Wait 200 ms : LED = 1 :Wait 200 ms : LED = 0 : Wait 600 ms
+
+    If HEFReadWord( HEF_Address ) = 0x3FFF And HEFReadWord( HEF_Address + 1 ) = 0x3FFF Then
+
+        GoSub Make_HEF_Array
+
+        HEF_Array(0) = 0
+        HEF_Array(1) = 2
+        HEF_Array(2) = 0
+        HEF_Array(3) = 1
+        HEF_Array(4) = 255
+        HEF_Array(5) = 0
+        HEF_Array(6) = 0
+        HEF_Array(7) = 0
+        HEF_Array(8) = 0
+
+        GoSub Write_HEF
+
+    End If
+
+    IO_config_byte = HEFReadWord( HEF_Address )
+    Delay_Index = HEFReadWord( HEF_Address + 1 )
+    PHY_Power =  HEFReadWord( HEF_Address + 2 )
+    ADC_Lower =  HEFReadWord( HEF_Address + 3 )
+    ADC_Upper =  HEFReadWord( HEF_Address + 4 )
+    Quiet_Step = HEFReadWord( HEF_Address + 5 )
+
+    If PHY_Power = 1 Then PHY_Enable = 1: Else: PHY_Enable = 0
+
+    #define Hserial_Baud 9600
+#define USART_BAUD_RATE Hserial_Baud
+#define USART_TX_BLOCKING
+#define USART_DELAY OFF
+    #define Hserial_Clear On
+
+     #define HSERIN_PIN PORTC.5
+     RC1STA.7 = 1
+     RC1STA.4 = 1
+     TX1STA.4 = 0
+
+    CH9121_CFG = 0
+    Flg_QS = 0
+
+Main:
+    ' >>> REVIEW: approximated HSerIn's per-byte timeout - GCBASIC's HSerReceive has no built-in timeout, so this reads once and treats the non-blocking "no new data" return (255) as a timeout; 255 can also be a genuine received byte, and the original per-byte wait is not reproduced - verify against Loop_Checks's intended behaviour
+    CONTROL_byte = HSerReceive
+    If CONTROL_byte = 255 Then GoTo Loop_Checks
+    DATA_byte = HSerReceive
+    If DATA_byte = 255 Then GoTo Loop_Checks
+
+    GoSub Data_Process
+
+Loop_Checks:
+
+    IO_State = 0
+    If AUX1_IN = 1 Then IO_State = 1
+    If AUX2_IN = 1 Then IO_State = IO_State + 2
+
+    If Old_IO_State <> IO_State  Then
+            LED = 0
+            IO_config_byte = HEFReadWord( HEF_Address )
+            Delay_Index = HEFReadWord( HEF_Address + 1 )
+
+            CH1_IO_Cfg = (IO_config_byte & 0b00001111)
+            CH2_IO_Cfg = (IO_config_byte & 0b11110000)
+
+            If CH1_IO_Cfg = 4 Then
+
+                    If  Old_Aux1_In <>  AUX1_IN Then
+
+                            If AUX1_IN = 0 Then
+
+                                    OLD_WPU_ATTEN_INF = WPU_ATTEN_INF
+                                    OLD_WPU_ATTEN_12 = WPU_ATTEN_12
+
+                                    WPU_ATTEN_INF = 0
+                                    WPU_ATTEN_12 = 0
+
+                                    If CH2_IO_Cfg = 128 And Delay_Index = 0 Then
+                                        AUX2_OUT = 1
+                                        Ser1Send 122
+                                    Else If CH2_IO_Cfg = 128 Then
+                                        Ser1Send 122
+                                        GoSub Get_Delay_Actual
+                                        Wait Delay_actual ms
+                                        AUX2_OUT = 1
+                                    Else
+                                        Ser1Send 122
+                                    End If
+
+                            Else If AUX1_IN = 1 Then
+
+                                        If CH2_IO_Cfg = 128  And Delay_Index = 0 Then
+                                                AUX2_OUT = 0
+                                        Else If  CH2_IO_Cfg = 128 Then
+                                                AUX2_OUT = 0
+                                                GoSub Get_Delay_Actual
+                                                Wait Delay_actual ms
+                                        End If
+                                    Ser1Send 123
+
+                                    WPU_ATTEN_INF = OLD_WPU_ATTEN_INF
+                                    WPU_ATTEN_12 = OLD_WPU_ATTEN_12
+                            End If
+                    Old_Aux1_In = AUX1_IN
+                    End If
+             End If
+
+             If CH2_IO_Cfg = 64 Then
+
+                    If  Old_Aux2_In <> AUX2_IN Then
+
+                            If AUX2_IN = 0 Then
+
+                                    OLD_WPU_ATTEN_INF = WPU_ATTEN_INF
+                                    OLD_WPU_ATTEN_12 = WPU_ATTEN_12
+
+                                    WPU_ATTEN_INF = 0
+                                    WPU_ATTEN_12 = 0
+
+                                    If CH1_IO_Cfg = 8 And Delay_Index = 0 Then
+                                        AUX1_OUT = 1
+                                        Ser1Send 122
+                                    Else If CH1_IO_Cfg = 8 Then
+                                        Ser1Send 122
+                                        GoSub Get_Delay_Actual
+                                        Wait Delay_actual ms
+                                        AUX1_OUT = 1
+                                    Else
+                                        Ser1Send 122
+                                    End If
+
+                            Else If AUX2_IN = 1 Then
+                                        If CH2_IO_Cfg = 8  And Delay_Index = 0 Then
+                                                AUX2_OUT = 0
+                                        Else If  CH2_IO_Cfg = 8 Then
+                                                AUX2_OUT = 0
+                                                GoSub Get_Delay_Actual
+                                                Wait Delay_actual ms
+                                        End If
+                                    Ser1Send 123
+
+                                    WPU_ATTEN_INF = OLD_WPU_ATTEN_INF
+                                    WPU_ATTEN_12 = OLD_WPU_ATTEN_12
+                            End If
+                    Old_Aux2_In = AUX2_IN
+                    End If
+             End If
+
+            Send_Byte = 0
+            If AUX1_IN = 0 Then Send_Byte = 1
+            If AUX2_IN = 0 Then Send_Byte = Send_Byte + 2
+            CONTROL_byte = 3
+            HSerSend CONTROL_byte
+            HSerSend Send_Byte
+
+            Old_IO_State = 0
+            If AUX1_IN = 1 Then Old_IO_State = 1
+            If AUX2_IN = 1 Then Old_IO_State = Old_IO_State + 2
+    End If
+
+    GoSub Read_ADC
+
+    If ONOFF = 1 Then LED = 1
+
+    GoTo Main
+
+
+
+Data_Process:
+
+    If CH9121_CFG = 1 Then
+         If CONTROL_byte <> 19 And DATA_byte <> 0 Then GoTo Main
+    End If
+
+    If ONOFF = 1 Then LED = 0
+
+    Select Case CONTROL_byte
+
+        Case 1
+            GoSub Handle_Type_1
+
+        Case 2
+            GoSub Send_PC_Reply
+
+        Case 4
+           GoSub CHANGE_IO
+
+        Case 5
+            IO_config_byte = DATA_byte
+
+            GoSub Make_HEF_Array
+            HEF_Array(0) = IO_config_byte
+            GoSub Write_HEF
+
+            Wait 50 ms
+
+            DATA_byte = HEFReadWord( HEF_Address )
+            CONTROL_byte = 6
+            HSerSend CONTROL_byte
+            HSerSend DATA_byte
+
+        Case 7
+            DATA_byte = HEFReadWord( HEF_Address )
+            CONTROL_byte = 6
+            HSerSend CONTROL_byte
+            HSerSend DATA_byte
+
+        Case 8
+            If DATA_byte = 1 Then
+                   ONOFF = 1
+                   LED = 1
+            Else
+                   ONOFF = 0
+                   LED = 0
+            End If
+
+            CONTROL_byte = 40
+             HSerSend CONTROL_byte
+             HSerSend DATA_byte
+            INTCON.GIE = 1
+
+        Case 9
+             CONTROL_byte = 10
+             HSerSend CONTROL_byte
+             HSerSend DATA_byte
+
+        Case 11
+              If DATA_byte = 1 Then
+                PHY_Enable = 1
+                PHY_Power = 1
+              Else If DATA_byte = 0 Then
+                PHY_Enable = 0
+                PHY_Power = 0
+              End If
+
+              GoSub Make_HEF_Array
+              HEF_Array(2) = PHY_Power
+              GoSub Write_HEF
+
+        Case 12
+             DATA_byte = 101
+             HSerSend 13
+             HSerSend DATA_byte
+
+        Case 14
+
+             WPU_ATTEN_INF = 0
+             WPU_ATTEN_6 = 0
+             WPU_ATTEN_12 = 0
+
+            ONOFF = 0
+            LED = 0
+
+       Case 15
+
+            #asmraw
+            Clrf INTCON
+            Movlp 0x1e
+            GoTo 0x600
+            #asmraw
+
+       Case 16
+            Delay_Index = DATA_byte
+
+            GoSub Make_HEF_Array
+            HEF_Array(1) = Delay_Index
+            GoSub Write_HEF
+
+            GoSub Get_Delay_Actual
+
+            DATA_byte = HEFReadWord( HEF_Address  + 1 )
+            HSerSend 17
+            HSerSend DATA_byte
+CFG:
+        Case 18
+
+            DATA_byte = HEFReadWord( HEF_Address  + 1 )
+            HSerSend 17
+            HSerSend DATA_byte
+
+        Case 19
+                If DATA_byte = 1   Then
+                    CH9121_CFG = 1
+                     RC1STA.4 = 0
+                     Wait 1000 ms
+                     CH9121_CFG = 0
+                     RC1STA.4 = 1
+                Else
+                    CH9121_CFG = 0
+                End If
+
+       Case 20
+             DATA_byte = 0
+             HSerSend 21
+             HSerSend DATA_byte
+
+       Case 24
+             If DATA_byte = 1 Then
+                DATA_byte = HEFReadWord( HEF_Address  + 2 )
+                HSerSend 25
+                HSerSend DATA_byte
+             End If
+       Case 28
+            GoSub Read_ADC
+            HSerSend 29
+            HSerSend ADC_Byte
+
+      Case 37
+        If DATA_byte = 255 Then
+            DATA_byte = HEFReadWord( HEF_Address  + 5 )
+            Quiet_Step = DATA_byte
+            HSerSend 38
+            HSerSend DATA_byte
+        Else
+            GoSub Make_HEF_Array
+            HEF_Array(5) = DATA_byte
+            Quiet_Step = DATA_byte
+            GoSub Write_HEF
+            HSerSend 38
+            HSerSend DATA_byte
+        End If
+     End Select
+
+    If ONOFF = 1 Then LED = 1
+
+Return
+
+
+Read_ADC:
+        ADCON0.1 = 1
+        Wait 1 ms
+        Do
+        Loop Until ADCON0.1 = 0
+        ADC_Byte = ADRESH
+Return
+
+Return
+
+Make_HEF_Array:
+        For i = 0 To 63
+            HEF_Array(i) = HEFReadWord( i + 0x1F80 )
+        Next
+Return
+
+Write_HEF:
+
+    //! use HEFEraseBlock
+    //! CErase 0x1F80
+    Wait 20 ms
+
+    For i = 0 To 63
+        //! use HEFWriteBlock
+        //! CWrite (HEF_Address + i), [HEF_Array(i)]
+    Next
+    Wait 20 ms
+Return
+
+Send_PC_Reply:
+
+    CONTROL_byte = 3
+    DATA_byte = 0b00000000
+    If AUX2_IN = 0 Then DATA_byte = (DATA_byte + 0b00000010)
+    If AUX1_IN = 0 Then DATA_byte = (DATA_byte + 0b00000001)
+
+     HSerSend CONTROL_byte
+     HSerSend DATA_byte
+Return
+
+
+CHANGE_IO:
+
+    IO_config_byte = HEFReadWord( HEF_Address )
+
+    If IO_config_byte.1 = 1 Then
+            AUX1_OUT = DATA_byte.0
+    End If
+
+    If IO_config_byte.5 = 1 Then
+            AUX2_OUT  = DATA_byte.1
+    End If
+
+    Return
+
+GET_IO:
+    DATA_byte = 0
+    If AUX1_IN = 0 Then DATA_byte = DATA_byte | 0b00000001
+    If AUX2_IN = 0 Then DATA_byte = DATA_byte | 0b00000010
+    CONTROL_byte = 0b10000000
+     HSerSend CONTROL_byte
+     HSerSend DATA_byte
+Return
+
+Handle_Type_1:
+    If DATA_byte = 90 Or DATA_byte = 91 Then
+       Flg_QS = 1
+    Else If DATA_byte > 87 And DATA_byte < 102 Then
+       Flg_QS = 0
+    End If
+
+    If DATA_byte = 122 Then
+        OLD_WPU_ATTEN_INF  = WPU_ATTEN_INF
+        OLD_WPU_ATTEN_12 = WPU_ATTEN_12
+
+        WPU_ATTEN_INF = 0
+        WPU_ATTEN_12 = 0
+        Ser1Send 122
+        Return
+     Else If  DATA_byte = 123 Then
+        WPU_ATTEN_INF = OLD_WPU_ATTEN_INF
+        WPU_ATTEN_12 = OLD_WPU_ATTEN_12
+        Ser1Send 123
+        Return
+    End If
+
+    If DATA_byte < 104 Or DATA_byte > 121 Then
+        Ser1Send DATA_byte
+
+        If Quiet_Step = 1 Then
+            LATA.0 = 1
+            Wait 8 ms
+            LATA.0 = 0
+        Else If  Quiet_Step = 2 And Flg_QS = 1 Then
+            LATA.0 = 1
+            Wait 8 ms
+            LATA.0 = 0
+        End If
+
+    Else If DATA_byte > 103 Then
+        GoSub Handle_Atten
+    End If
+
+    HSerSend 33
+    HSerSend 1
+Return
+
+Handle_Atten:
+
+    If DATA_byte = 104 Then
+
+         WPU_ATTEN_INF = 1
+         WPU_ATTEN_6 = 1
+         WPU_ATTEN_12 = 1
+
+    Else If DATA_byte = 106 Then
+
+         WPU_ATTEN_INF = 1
+         WPU_ATTEN_6 = 0
+         Wait 5 ms
+         WPU_ATTEN_12 = 1
+
+    Else If DATA_byte = 108 Then
+
+         WPU_ATTEN_INF = 1
+         WPU_ATTEN_12 = 0
+         Wait 5 ms
+         WPU_ATTEN_6 = 1
+
+    Else If DATA_byte = 110 Then
+
+         WPU_ATTEN_INF = 1
+         WPU_ATTEN_6 = 0
+         WPU_ATTEN_12 = 0
+
+    Else If DATA_byte = 118 Then
+
+         WPU_ATTEN_INF = 0
+         WPU_ATTEN_6 = 0
+         WPU_ATTEN_12 = 0
+
+    End If
+Return
+
+Get_Delay_Actual:
+    Select Case Delay_Index
+        Case 0
+            Delay_actual = 0
+        Case 1
+            Delay_actual = 0
+        Case 2
+            Delay_actual = 50
+        Case 3
+            Delay_actual = 100
+        Case 4
+            Delay_actual = 145
+        Case 5
+            Delay_actual = 150
+        Case 6
+            Delay_actual = 250
+       Case Else
+            Delay_actual = 0
+    End Select
+Return
+
+
+TIMEOUT1:
+
+   GoTo Main
+
+  GoTo Main
