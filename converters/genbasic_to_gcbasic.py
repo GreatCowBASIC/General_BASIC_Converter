@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 genbasic_to_gcbasic.py
-=======================
+======================
 
-Heuristic source-to-source converter for porting BASIC style code to GCBASIC.
+Heuristic source-to-source converter for porting General BASIC style
+code to Great Cow BASIC (GCBASIC).
 
 The script is intentionally line-oriented and best-effort rather than a full
 parser. It applies a large set of mechanical rewrites, then leaves anything
@@ -12,33 +13,27 @@ result can be compiled and checked by hand before it is flashed to hardware.
 
 What it currently handles
 -------------------------
-- Device/Xtal lines -> merged #chip directive, followed by #option explicit
+- Device/Xtal lines -> merged #chip directives
 - Symbol/Declare assignments -> #define
-- Config1..ConfigN directives -> #config; bare "Config <fuses>" -> #Config
-- DelayMS/DelayUS -> Wait n ms / Wait n us
-- EndIf -> End If
-- Leading "@ <line>" -> "Asm <line>" (single-line inline assembly)
-- On_Hardware_Interrupt GoTo <label> -> commented out for review, and the
-  target Sub's declaration renamed to "Interrupt"
-- Context Save / Context Restore -> commented out (GCBASIC's Interrupt
-  sub handles this automatically)
-- var = ADIn channel -> var = READAD(ANx) / READAD10(ANx), chosen by the
-  target variable's declared type
-- Bare "Clear" (no operand) -> commented out with a REVIEW note
-- "*/" (Multiply Middle) operator -> "(A * B) / 256"
+- Config1..ConfigN directives -> #config
+- DelayMS -> Wait n ms
 - %binary and $hex literals -> 0b/0x forms
 - Dword/Long typing and related helper usage
-- Bare Clear/Set/High/Low bit operations -> assignments to 0/1
-- While/Wend -> Do While/Loop (standalone "While 1 = 1"/"While True" ->
-  "Do Forever")
+- Bare Clear/Set bit operations -> assignments to 0/1
+- While/Wend -> Do While/Loop
 - Repeat/Until -> Do/Loop Until
 - Inc/Dec -> ++/--
 - Select Case comparisons -> Case range forms, with upper bounds derived from
   the variable type when the source provides enough information
-- Common serial and EEPROM helpers for Basic idioms
+- Common serial and EEPROM helpers for General BASIC idioms
 - Declare LCD_xxx and unsupported constructs -> commented out for review
 - Pascal-style (* ... *) comments -> line comments with review markers when
   necessary
+- General BASIC label: ... Return subroutines -> Sub name ... End Sub (only for
+  labels that are targets of GOSUB). Plain mid-sub labels (e.g. CFG:) stay
+  as labels and do not close the Sub. Intermediate Return -> Exit Sub; the
+  final Return of a Sub is absorbed into End Sub. GOSUB/GoSub name -> bare
+  name call.
 
 Usage
 -----
@@ -56,7 +51,7 @@ Important notes
 
 Transformation strategy
 ----------------------
-1. Normalize source lines and strip or rewrite obvious BASIC syntax.
+1. Normalize source lines and strip or rewrite obvious General BASIC syntax.
 2. Convert declarations, directives, literals, and control-flow forms to
    GCBASIC equivalents.
 3. Replace unsupported or ambiguous constructs with comments or helper-based
@@ -75,13 +70,8 @@ from pathlib import Path
 # Regex patterns (compiled once)
 # ---------------------------------------------------------------------
 
-
-# Matched against the comment-stripped `code` half of a line (see
-# split_code_comment()), never the raw line - so a trailing "' comment"
-# never prevents the match. Xtal also accepts an optional leading
-# "Declare " (BASIC accepts both "Xtal = 20" and "Declare Xtal = 20").
 RE_DEVICE = re.compile(r'^\s*Device\s*=\s*(\S+)\s*$', re.IGNORECASE)
-RE_XTAL = re.compile(r'^\s*(?:Declare\s+)?Xtal\s*=\s*(\S+)\s*$', re.IGNORECASE)
+RE_XTAL = re.compile(r'^\s*Xtal\s*=\s*(\S+)\s*$', re.IGNORECASE)
 
 RE_SYMBOL = re.compile(r'^(\s*)Symbol\s+(\w+)\s*=\s*(.+?)\s*$', re.IGNORECASE)
 
@@ -89,34 +79,26 @@ RE_SYMBOL = re.compile(r'^(\s*)Symbol\s+(\w+)\s*=\s*(.+?)\s*$', re.IGNORECASE)
 # Hserial_Baud = 9600", "Declare HSERIN_PIN PORTC.5") is a compile-time
 # constant assignment, same idea as Symbol - GCBASIC has no "Declare"
 # form for this, so both spellings become "#define NAME VALUE". The '='
-# is optional since BASIC accepts either. Doesn't match "Declare
+# is optional since General BASIC accepts either. Doesn't match "Declare
 # LCD_xxx ..." (handled separately above, checked first).
 RE_DECLARE_ASSIGN = re.compile(r'^(\s*)Declare\s+(\w+)\s*=?\s*(.+?)\s*$', re.IGNORECASE)
 
 # PIC18F/enhanced-core-style "Config1".."Config7" fuse-setting lines are
 # all just GCBASIC's single #config directive - the trailing number is a
-# BASIC-ism with no GCBASIC meaning, so it's dropped entirely
+# General BASIC-ism with no GCBASIC meaning, so it's dropped entirely
 # ("Config5 CP_OFF" -> "#Config CP_OFF").
 RE_CONFIG_LINE = re.compile(r'^(\s*)Config[1-9]\d*\b(.*)$', re.IGNORECASE)
 
-# Baseline/mid-range-style bare "Config <fuse>, <fuse>, ..." (no trailing
-# number, e.g. "Config FOSC_INTRCIO, WDTE_OFF, ...") is likewise just
-# GCBASIC's #config directive - since it isn't numbered there's nothing
-# to drop, so this just adds the leading '#'. Checked after
-# RE_CONFIG_LINE above so a numbered "Config1 ..." is never re-matched
-# here.
-RE_CONFIG_BARE = re.compile(r'^(\s*)(Config\b.*)$', re.IGNORECASE)
-
 # --- Serial commands -------------------------------------------------
-# GCBASIC has no BASIC-style bracketed item-list serial statements.
+# GCBASIC has no General BASIC style bracketed item-list serial statements.
 # Hardware USART: HSerOut [a, b] -> HSerSend a / HSerSend b (one call per
 # item); HSerIn timeout,label,[a,b] -> a = HSerReceive / b = HSerReceive,
 # each followed by an "If x = 255 Then GoTo label" (255 is HSerReceive's
 # "no new data" sentinel when USART_BLOCKING isn't defined - the closest
-# available approximation of BASIC's per-byte timeout, flagged below
+# available approximation of General BASIC's per-byte timeout, flagged below
 # since it isn't exact and 255 can also be a genuine received byte).
 # --- Command lookup table ---------------------------------------------
-# A single, easily-extended table of "old BASIC construct -> new
+# A single, easily-extended table of "old General BASIC construct -> new
 # GCBASIC guidance" entries, for the class of one-off statement-level
 # substitutions that don't need their own bespoke logic. Two kinds:
 #
@@ -173,18 +155,6 @@ COMMAND_LOOKUP = [
         "pattern": re.compile(r'^(\s*)(CWrite\b.*)$', re.IGNORECASE),
         "hint": "use HEFWriteBlock",
     },
-    {
-        "name": "Context Save",
-        "kind": "comment_out",
-        "pattern": re.compile(r'^(\s*)(Context\s+Save\b.*)$', re.IGNORECASE),
-        "hint": "GCBASIC's Interrupt sub saves/restores context automatically",
-    },
-    {
-        "name": "Context Restore",
-        "kind": "comment_out",
-        "pattern": re.compile(r'^(\s*)(Context\s+Restore\b.*)$', re.IGNORECASE),
-        "hint": "GCBASIC's Interrupt sub saves/restores context automatically",
-    },
 ]
 
 
@@ -209,6 +179,50 @@ def apply_command_lookup(code, comment, newline, lookup_usage):
 
 
 RE_HSEROUT = re.compile(r'^(\s*)HSerOut\s*\[\s*(.*?)\s*\]\s*$', re.IGNORECASE)
+# Classifiers used to recognise the "packet" shape of an HSerOut item list
+# (a mix of quoted text and bare variables, e.g. ["{", noun, "ACK",
+# Txt_K9AY, "}"]) so it can be folded into a single HSerPrint - see the
+# HSerOut handler below.
+RE_HSEROUT_STRLIT_ITEM = re.compile(r'^"([^"]*)"$')
+RE_HSEROUT_IDENT_ITEM = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+# Bare numeric ASCII-code item, e.g. HSerOut ["AT",44,34,13,10] where 44 is
+# ',', 34 is '"', and 13/10 are CR/LF. Hex literals ($0D) are already
+# folded to 0x0D by the time this runs (see the RE_HEXLIT.sub above).
+RE_HSEROUT_NUMLIT_ITEM = re.compile(r'^(?:0[xX][0-9A-Fa-f]+|\d+)$')
+# Chr()/Asc() function-call items are byte values (per the project's own
+# convention) and belong on HSerSend, not HSerPrint.
+RE_HSEROUT_CHRASC_ITEM = re.compile(r'^(?:Chr|Asc)\s*\(.*\)$', re.IGNORECASE)
+# General BASIC's STR modifier inside an HSerIn/SerIn item list - "Str array"
+# or "Str array\length[\terminator]" - receives a multi-byte string into
+# array, not a single byte into a plain variable. Naively treating the
+# whole "Str array..." text as one receive-target variable name (as the
+# per-item loop below does for ordinary items) produces invalid GCBASIC
+# like "Str byte_verb = HSerReceive" - this pulls the array name back out
+# so the item loop below can special-case it instead.
+RE_HSERIN_STR_ITEM = re.compile(r'^Str\s+([A-Za-z_]\w*)(\\.*)?$', re.IGNORECASE)
+
+
+def split_hserout_items(items_str):
+    """Split an HSerOut/SerOut bracketed item list on top-level commas,
+    ignoring any comma that falls inside a double-quoted string literal
+    (e.g. the item "{STAT," contains a comma that is part of the framed
+    text, not a separator). A naive items_str.split(',') tears that
+    literal in half and leaves each half's quotes unbalanced, which is
+    what produces GCBASIC's "Missing closing double quote" error."""
+    items = []
+    current = []
+    in_quotes = False
+    for ch in items_str:
+        if ch == '"':
+            in_quotes = not in_quotes
+            current.append(ch)
+        elif ch == ',' and not in_quotes:
+            items.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    items.append(''.join(current).strip())
+    return [it for it in items if it]
 RE_HSERIN = re.compile(
     r'^(\s*)HSerIn\s+([^\s,]+)\s*,\s*([^\s,\[\]]+)\s*,\s*\[\s*(.*?)\s*\]\s*$',
     re.IGNORECASE,
@@ -236,22 +250,11 @@ RE_SERIN_TIMEOUT = re.compile(
 )
 
 RE_DELAYMS = re.compile(r'\bDelayMS\s+(\S+)', re.IGNORECASE)
-RE_DELAYUS = re.compile(r'\bDelayUS\s+(\S+)', re.IGNORECASE)
 
 RE_BINLIT = re.compile(r'%([01]{1,32})\b')
 
-# BASIC hex literals ($FF, $FFFF, $1F80, ...) -> GCBASIC's 0x prefix.
+# General BASIC hex literals ($FF, $FFFF, $1F80, ...) -> GCBASIC's 0x prefix.
 RE_HEXLIT = re.compile(r'\$([0-9A-Fa-f]+)\b')
-
-# "*/" (Multiply Middle) operator: "A */ B" multiplies A by B and keeps
-# only the middle 16 bits of the 32-bit product - mathematically the
-# same as "(A * B) / 256". GCBASIC has no "*/" operator, so this is
-# rewritten to that equivalent expression. Operands are limited to
-# simple tokens (identifiers/numbers/dotted bit refs); a parenthesized
-# or otherwise complex operand isn't matched and is left for manual
-# review, since correctly bracketing an arbitrary sub-expression by
-# regex isn't reliable.
-RE_MUL_MID = re.compile(r'([\w.]+)\s*\*/\s*([\w.]+)')
 
 # C-header-style bitfield access (REGISTERbits_FIELD, as generated by
 # MPLAB XC8 headers, e.g. "INTCONbits_GIE") -> GCBASIC's REGISTER.FIELD
@@ -281,7 +284,7 @@ def _replace_cread(m):
 RE_DIM_LINE = re.compile(r"^\s*Dim\s+(.+?)\s+As\s+(\w+)\b", re.IGNORECASE)
 RE_DWORD_TYPE = re.compile(r'\bDword\b', re.IGNORECASE)
 
-# BASIC allows a space between an array name and its size, e.g.
+# General BASIC allows a space between an array name and its size, e.g.
 # "Dim HEF_Array [64] As Byte" - but the bracket itself is also wrong for
 # GCBASIC: GCBASIC arrays are declared and indexed with parentheses,
 # "Dim HEF_Array(64) As Byte" / "HEF_Array(i)", and reserves [ ] for type
@@ -293,14 +296,14 @@ RE_DIM_ARRAY_BRACKET = re.compile(r'^\s*Dim\s+(\w+)\s*\[', re.IGNORECASE)
 
 # After the bracket->paren rewrite above, flag (and strip) any trailing
 # word after "Dim NAME(...) As TYPE" that isn't a documented GCBASIC Dim
-# modifier (Alias / At / = initialvalue) - e.g. the BASIC
+# modifier (Alias / At / = initialvalue) - e.g. the General BASIC
 # "Heap" qualifier, which has no GCBASIC equivalent and is not guessed at.
 RE_DIM_TRAILING_TOKEN = re.compile(
     r'^(\s*Dim\s+\w+\(\s*[^)]*?\s*\)\s*As\s+\w+)\s+(\S.*?)\s*$', re.IGNORECASE
 )
 RE_DIM_RECOGNIZED_TRAILING = re.compile(r'^(Alias\b|At\b|=)', re.IGNORECASE)
 
-# BASIC's "For var = start UpTo end" is GCBASIC's "For var = start To
+# General BASIC's "For var = start UpTo end" is GCBASIC's "For var = start To
 # end" - GCBASIC has no UpTo/DownTo keywords.
 RE_FOR_UPTO = re.compile(r'\bUpTo\b', re.IGNORECASE)
 
@@ -325,38 +328,8 @@ RE_SET_BARE = re.compile(r"^(\s*)Set\s+(\w+)\s*$", re.IGNORECASE)
 # Don't touch "Set X On"/"Set X Off" - those are already valid GCBASIC.
 RE_SET_ONOFF = re.compile(r'^\s*Set\s+\w+\s+(On|Off)\b', re.IGNORECASE)
 
-# A bare "Clear" with no operand (distinct from "Clear NAME" above, which
-# is a bit-clear) means "zero all RAM" in PIC BASIC dialects - GCBASIC
-# has no equivalent single statement, so this is commented out with a
-# REVIEW note rather than guessed at.
-RE_CLEAR_ALONE = re.compile(r"^(\s*)Clear\s*$", re.IGNORECASE)
-
-# "var = ADIn channel" (analog read) -> GCBASIC's READAD()/READAD10().
-# READAD returns an 8-bit result (for a Byte target), READAD10 a 10-bit
-# result (for a Word target) - see the var_types lookup below. The
-# channel argument is converted to GCBASIC's ANx form if it's a bare
-# number ("3" -> "AN3"); anything else (already-symbolic, e.g. a
-# #define'd channel name) is passed through unchanged.
-RE_ADIN_ASSIGN = re.compile(r'^(\s*)(\w+)\s*=\s*ADIn\s+(\S+)\s*$', re.IGNORECASE)
-
-# "High PIN" / "Low PIN" drive a pin/bit directly (e.g. "High PORTB.0")
-# and have no GCBASIC statement equivalent - GCBASIC just assigns the
-# bit: "PORTB.0 = 1" / "PORTB.0 = 0". The target may be a dotted
-# register.bit reference, unlike Clear/Set's bare \w+ name above.
-RE_HIGH_BARE = re.compile(r"^(\s*)High\s+([A-Za-z_]\w*(?:\.\w+)?)\s*$", re.IGNORECASE)
-RE_LOW_BARE = re.compile(r"^(\s*)Low\s+([A-Za-z_]\w*(?:\.\w+)?)\s*$", re.IGNORECASE)
-
 RE_WHILE = re.compile(r'(?<!Do )\bWhile\b', re.IGNORECASE)
 RE_WEND = re.compile(r'\bWend\b', re.IGNORECASE)
-
-# Standalone "While 1 = 1" / "While True" / "While -1" loop-opener (the
-# whole statement, nothing else on the line) -> "Do Forever". Checked
-# before the generic RE_WHILE substitution above/below so an always-true
-# condition gets GCBASIC's dedicated infinite-loop form instead of a
-# literally-true "Do While" condition.
-RE_WHILE_ALWAYS_TRUE = re.compile(
-    r'^(\s*)While\s+(?:1\s*=\s*1|True|-1)\s*$', re.IGNORECASE
-)
 
 RE_REPEAT = re.compile(r'\bRepeat\b', re.IGNORECASE)
 RE_UNTIL_START = re.compile(r'^(\s*)Until\b', re.IGNORECASE)
@@ -364,35 +337,62 @@ RE_UNTIL_START = re.compile(r'^(\s*)Until\b', re.IGNORECASE)
 RE_INC = re.compile(r'\bInc\s+(\w+)\b', re.IGNORECASE)
 RE_DEC = re.compile(r'\bDec\s+(\w+)\b', re.IGNORECASE)
 
+# General BASIC subroutines: "label:" ... "Return". GOSUB targets become
+# Sub/End Sub; intermediate Return becomes Exit Sub. GoSub may be mid-line.
+RE_GOSUB_ANY = re.compile(r'\bGOSUB\s+(\w+)\b', re.IGNORECASE)
+RE_LABEL_DEF = re.compile(r'^(\s*)(\w+)\s*:\s*$', re.IGNORECASE)
+RE_RETURN_BARE = re.compile(r'^(\s*)Return\s*$', re.IGNORECASE)
+
+# General BASIC's keyword-style "Str variable" (no parens) converts a value
+# to a string - it is NOT the same as GCBASIC's own (deprecated) Str()
+# function, which stringifies a *number* to decimal text. Only the
+# bareword form is rewritten (Str(x) is left alone, since "\s+" after
+# \bStr\b won't match an immediately-following '('), and \bStr\b won't
+# match "StrInteger"/"Str32" since there's no word boundary before their
+# trailing letters/digits. Which GCBASIC function this becomes depends
+# on whether the variable is an array: "Str bytearray" copies a whole
+# byte array's characters into a string (-> ArrayToString(), a small
+# helper this converter injects, since GCBASIC has no built-in for it),
+# while "Str scalarvar" is a single byte/word (-> ByteToString()) - see
+# the RE_STR_BAREWORD.sub(...) call below, which picks between the two
+# using build_array_var_names()'s array-name set.
+RE_STR_BAREWORD = re.compile(r'\bStr\b\s+([A-Za-z_]\w*)')
+# General BASIC's ToUpper()/ToLower() -> GCBASIC's Ucase()/Lcase().
+RE_TOUPPER = re.compile(r'\bToUpper\s*\(', re.IGNORECASE)
+RE_TOLOWER = re.compile(r'\bToLower\s*\(', re.IGNORECASE)
+
 RE_SELECT_CASE = re.compile(r'^\s*Select\s+Case\s+(.+?)\s*$', re.IGNORECASE)
 RE_ELSE_IF = re.compile(r'\bElse\s*If\b', re.IGNORECASE)
 RE_CASE_REL = re.compile(r'\bCase\s*([<>])\s*(\S+)', re.IGNORECASE)
 
-# "EndIf" (no space) closing an If block -> GCBASIC requires the two-word
-# "End If". Anchored to the whole statement since EndIf is always a
-# standalone block-closing line, never part of a larger statement.
-RE_ENDIF = re.compile(r'^(\s*)EndIf\s*$', re.IGNORECASE)
+# A single-line "If cond Then stmt1 : stmt2 [: ...]" - GCBASIC requires
+# multiple statements after Then to be a full If/End If block, not a
+# colon-separated one-liner. A single statement after Then ("If cond Then
+# GoTo Label") is already valid GCBASIC as a one-liner and is left alone
+# - only a *colon inside the Then-clause* triggers the block rewrite.
+RE_IF_THEN_STMT = re.compile(r'^(\s*)If\s+(.+?)\s+Then\s+(\S.*)$', re.IGNORECASE)
 
-# A leading "@" marks a single inline-assembly line in some BASIC
-# dialects (e.g. "@ Clrf PCLATH") - GCBASIC's equivalent single-line form
-# is the "Asm" keyword ("Asm Clrf PCLATH"). This is distinct from the
-# Asm/EndAsm *block* markers in COMMAND_LOOKUP above, which wrap multiple
-# lines rather than prefixing one.
-RE_AT_ASM = re.compile(r'^(\s*)@\s*(\S.*?)\s*$', re.IGNORECASE)
 
-# "On_Hardware_Interrupt GoTo <label>" has no GCBASIC equivalent -
-# GCBASIC auto-dispatches every hardware interrupt to a Sub literally
-# named "Interrupt". The original line is commented out for review, and
-# the Sub declaration matching <label> (found elsewhere in the file) is
-# renamed to "Interrupt" - see interrupt_sub_name handling in
-# convert_source()/convert_line().
-RE_ON_HW_INTERRUPT = re.compile(
-    r'^(\s*)On_Hardware_Interrupt\s+GoTo\s+(\w+)\s*$', re.IGNORECASE
-)
-RE_SUB_DECL = re.compile(r'^(\s*)Sub\s+(\w+)\b(.*)$', re.IGNORECASE)
+def split_colon_statements(text):
+    """Split a run of colon-separated statements on top-level colons,
+    ignoring any colon that falls inside a double-quoted string."""
+    parts = []
+    current = []
+    in_quotes = False
+    for ch in text:
+        if ch == '"':
+            in_quotes = not in_quotes
+            current.append(ch)
+        elif ch == ':' and not in_quotes:
+            parts.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    parts.append(''.join(current).strip())
+    return [p for p in parts if p]
 
 # GCBASIC treats these as built-in math/logic operators (X Mod Y, A And B,
-# Not X, A Or B, A Xor B). A BASIC Symbol constant that happens to be
+# Not X, A Or B, A Xor B). A General BASIC Symbol constant that happens to be
 # named one of these would collide with the operator in GCBASIC, so any
 # such Symbol gets renamed with this prefix, and every use of it in the
 # source is rewritten to match - see find_reserved_symbol_renames() /
@@ -404,7 +404,7 @@ RE_DECLARE_LCD = re.compile(r'^(\s*)Declare\s+(LCD_\w+)\s+(.+?)\s*$', re.IGNOREC
 
 RE_COMMENT_LINE = re.compile(r"^\s*['#;]")  # apostrophe / semicolon / directive
 
-# BASIC Pro Pascal-style block comments: (* ... *). GCBASIC has no
+# General BASIC Pascal-style block comments: (* ... *). GCBASIC has no
 # block-comment operator, only a leading ' for a same-line comment, so
 # these get rewritten line-by-line - see convert_block_comment_line().
 RE_BLOCK_COMMENT_START = re.compile(r'\(\*')
@@ -428,7 +428,7 @@ def split_code_comment(code_line):
 HELPER_SUBS = '''
 ' ---------------------------------------------------------------
 ' Auto-generated helper subs: GCBASIC's EPWrite/EPRead handle one
-' EEPROM byte at a time, unlike BASIC-style ERead/EWrite which
+' EEPROM byte at a time, unlike General BASIC style ERead/EWrite which
 ' can pack/unpack a whole DWORD in one call. These subs replicate
 ' that behaviour for 32-bit (Long) variables using plain arithmetic
 ' (Mod / integer division) rather than shift operators, for the
@@ -456,9 +456,33 @@ Sub EE_ReadLong(location As Byte, Out longval As Long)
 End Sub
 '''
 
-CONVERTER_VERSION = "1.0.0-build.2"
-CONVERTER_DATE = "2026-08-13"
-CONVERTER_BUILD = "2"
+ARRAYTOSTRING_HELPER = '''
+' ---------------------------------------------------------------
+' Auto-generated helper function: GCBASIC has no built-in equivalent
+' of General BASIC's "Str arrayvar" (copy a byte array's contents into a
+' string). This assumes the General BASIC convention that element 0 of the
+' array holds the array's length, and elements 1..length are the
+' actual bytes to convert - adjust if the original array used a
+' different length/terminator convention.
+' ---------------------------------------------------------------
+Function ArrayToString(ArrayToStringParam As String) As String
+    Dim ArrayToStringResult As String
+    Dim ArrayToStringLength As Byte
+    Dim ArrayToStringIndex As Byte
+
+    ArrayToStringResult = ""
+    ArrayToStringLength = ArrayToStringParam(0)
+    For ArrayToStringIndex = 1 To ArrayToStringLength
+        ArrayToStringResult = ArrayToStringResult + Chr(ArrayToStringParam(ArrayToStringIndex))
+    Next ArrayToStringIndex
+
+    ArrayToString = ArrayToStringResult
+End Function
+'''
+
+CONVERTER_VERSION = "1.1.0"
+CONVERTER_DATE = "2026-08-14"
+CONVERTER_BUILD = "1621"
 
 # Derive the runtime OS string from the current platform so this stays correct
 # for 32-bit, 64-bit, and non-Windows builds.
@@ -469,7 +493,8 @@ else:
     CONVERTER_OS = platform.system()
 
 HEADER_TEMPLATE = """'****************************************************************
-'*  GENERAL BASIC to GCBASIC Converted ({date} ({os}) : Build {build}) *
+'*  GenBasic to GCBASIC Converted ({date} ({os}) : Build {build}) *
+'*  Converter   : genbasic_to_gcbasic.py  v{version}
 '*  Source file : {source_name}
 '*                                                                *
 '*  This is a HEURISTIC, line-based conversion. It has NOT been  *
@@ -514,10 +539,52 @@ def build_type_map(lines):
     return types
 
 
-def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=None, interrupt_sub_name=None):
+RE_DIM_ARRAY_NAME = re.compile(r'^(\w+)\s*[\[\(]')
+
+
+def build_array_var_names(lines):
+    """First pass: scan Dim declarations for array-typed names, in either
+    bracket ('Dim NAME[SIZE] As TYPE') or paren ('Dim NAME(SIZE) As
+    TYPE') form, including when mixed with plain scalar names in the
+    same comma-separated Dim list (e.g. 'Dim a, b(10) As Byte'). Used to
+    tell 'Str arrayvar' (General BASIC's array-to-string, -> ArrayToString())
+    apart from 'Str scalarvar' (a single byte/word -> ByteToString())."""
+    names = set()
+    for line in lines:
+        code, _ = split_code_comment(line)
+        m = RE_DIM_LINE.match(code)
+        if not m:
+            continue
+        names_part, _type_part = m.groups()
+        for raw_name in split_dim_names(names_part):
+            am = RE_DIM_ARRAY_NAME.match(raw_name)
+            if am:
+                names.add(am.group(1).lower())
+    return names
+
+
+def review_note(text, original_line):
+    """Build a "' >>> REVIEW: ..." comment (including the leading
+    apostrophe) with the untouched original source line appended (as
+    "\\<line>"), so it's always possible to see exactly what General BASIC
+    statement a REVIEW note is about, side-by-side with the
+    approximation/removal, without hunting back through the source file."""
+    return f"' >>> REVIEW: {text} \\{original_line.rstrip(chr(10) + chr(13))}"
+
+
+def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=None, tmp_counter=None, array_var_names=None, needs_array_to_string=None):
     """Apply all single-line regex transforms. Returns the transformed
     line (str). May set needs_helpers[0] = True as a side effect if a
     Long/Dword ERead/EWrite is found."""
+
+    if tmp_counter is None:
+        # Per-call fallback only - convert_source always passes a shared
+        # counter so temp names stay unique across the whole file.
+        tmp_counter = [0]
+    if array_var_names is None:
+        array_var_names = set()
+    if needs_array_to_string is None:
+        needs_array_to_string = [False]
 
     # Preserve the line ending exactly (may be '\n', '\r\n', or '' at EOF).
     stripped_end = line
@@ -539,7 +606,7 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
     # Split off any trailing comment so regex substitutions never touch it.
     code, comment = split_code_comment(code_line)
 
-    # BASIC hex literals ($FF, $1F80, ...) -> GCBASIC's 0x prefix.
+    # General BASIC hex literals ($FF, $1F80, ...) -> GCBASIC's 0x prefix.
     # Done here, right after the code/comment split, and also folded back
     # into code_line so the few special cases below that still match
     # against the whole code_line (Declare LCD_xxx, Repeat/Until, Dim
@@ -554,8 +621,9 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
     m = RE_DECLARE_LCD.match(code_line)
     if m:
         indent, name, rest = m.groups()
-        return (f"{indent}' >>> REVIEW: removed 'Declare {name} {rest}' - "
-                f"no LCD library is used by this converter; re-add if needed{newline}")
+        return (f"{indent}" + review_note(
+            f"removed 'Declare {name} {rest}' - no LCD library is used "
+            f"by this converter; re-add if needed", line) + newline)
 
     # Single-line "Repeat : Until cond" -> GCBASIC needs the exit
     # condition on its own "Loop Until" line, so this expands to two
@@ -567,18 +635,18 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
 
     # Dim NAME(SIZE) As TYPE <trailing> - flag/strip any trailing word
     # that isn't a recognized GCBASIC Dim modifier (Alias/At/=), e.g. the
-    # BASIC "Heap" qualifier, which has no known GCBASIC
+    # General BASIC "Heap" qualifier, which has no known GCBASIC
     # equivalent and is not guessed at.
     m = RE_DIM_TRAILING_TOKEN.match(code_line)
     if m:
         core, trailing = m.groups()
         if not RE_DIM_RECOGNIZED_TRAILING.match(trailing):
-            return (f"{core}  ' >>> REVIEW: removed trailing '{trailing}' "
-                     f"from this Dim - not a recognized GCBASIC Dim option "
-                     f"(Alias/At/=), and its intended purpose in the "
-                     f"original source is unclear; add the correct "
-                     f"GCBASIC equivalent (e.g. 'At location') if needed"
-                     f"{newline}")
+            return (f"{core}  " + review_note(
+                f"removed trailing '{trailing}' from this Dim - not a "
+                f"recognized GCBASIC Dim option (Alias/At/=), and its "
+                f"intended purpose in the original source is unclear; "
+                f"add the correct GCBASIC equivalent (e.g. 'At location') "
+                f"if needed", line) + newline)
 
     # Symbol alias -> #define
     m = RE_SYMBOL.match(code)
@@ -601,49 +669,6 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
         indent, rest = m.groups()
         return f"{indent}#Config{rest}{('  ' + comment) if comment else ''}{newline}"
 
-    # Bare "Config <fuse>, <fuse>, ..." (no trailing number) -> just add
-    # the leading '#'.
-    m = RE_CONFIG_BARE.match(code)
-    if m:
-        indent, rest = m.groups()
-        return f"{indent}#{rest}{('  ' + comment) if comment else ''}{newline}"
-
-    # "EndIf" -> "End If" (GCBASIC needs the two-word form).
-    m = RE_ENDIF.match(code)
-    if m:
-        indent = m.group(1)
-        return f"{indent}End If{('  ' + comment) if comment else ''}{newline}"
-
-    # "@ <asm line>" -> "Asm <asm line>" (single-line inline assembly).
-    m = RE_AT_ASM.match(code)
-    if m:
-        indent, asm_line = m.groups()
-        return f"{indent}Asm {asm_line}{('  ' + comment) if comment else ''}{newline}"
-
-    # "On_Hardware_Interrupt GoTo <label>" -> GCBASIC has no such
-    # statement; it auto-dispatches to a Sub literally named "Interrupt".
-    # Comment the line out for review - the target Sub's declaration is
-    # renamed to "Interrupt" separately, below.
-    m = RE_ON_HW_INTERRUPT.match(code)
-    if m:
-        indent, target = m.groups()
-        tail = f"  {comment}" if comment else ""
-        return (f"{indent}' >>> REVIEW: removed 'On_Hardware_Interrupt GoTo "
-                 f"{target}' - GCBASIC dispatches hardware interrupts to a "
-                 f"Sub literally named 'Interrupt'; the '{target}' Sub "
-                 f"below was renamed to 'Interrupt'{tail}{newline}")
-
-    # If this file had an On_Hardware_Interrupt line, rename the target
-    # Sub's declaration to "Interrupt" wherever it's defined.
-    if interrupt_sub_name:
-        m = RE_SUB_DECL.match(code)
-        if m and m.group(2).lower() == interrupt_sub_name.lower():
-            indent, _name, rest = m.groups()
-            tail = f"  {comment}" if comment else ""
-            return (f"{indent}Sub Interrupt{rest}  "
-                     f"' >>> renamed from '{interrupt_sub_name}' (target of "
-                     f"On_Hardware_Interrupt){tail}{newline}")
-
     # Command lookup table (bit-alias Dim, Asm/EndAsm, CErase/CWrite,
     # and anything else added to COMMAND_LOOKUP later) - see the table
     # definition above for how to add new entries.
@@ -651,37 +676,91 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
     if lookup_result is not None:
         return lookup_result
 
+    # GOSUB / GoSub name -> bare name (GCBASIC Sub call). Mid-line OK.
+    def _gosub_repl(m):
+        key = "GOSUB name -> name (Sub call)"
+        lookup_usage[key] = lookup_usage.get(key, 0) + 1
+        return m.group(1)
+    code = RE_GOSUB_ANY.sub(_gosub_repl, code)
+
     # HSerOut [a, b, ...] -> HSerSend a / HSerSend b / ... (GCBASIC has no
-    # bracketed item-list form - one call per item).
+    # bracketed item-list form - one call per item). This per-item split
+    # only works while every item is a single byte, though: HSerSend
+    # sends one byte, so it breaks on any multi-character string literal
+    # (e.g. "ACK"). Since HSerPrint takes a full string in one call, each
+    # item can simply be sent with the command that matches its own type
+    # - HSerSend for a byte constant/value (a bare numeric ASCII code, a
+    # Chr()/Asc() function result, or a variable not known to hold a
+    # String), HSerPrint for a string constant (any quoted literal,
+    # regardless of length) or a variable known to hold a String.
     m = RE_HSEROUT.match(code)
     if m:
         indent, items_str = m.groups()
-        items = [it.strip() for it in items_str.split(',') if it.strip()]
-        return ''.join(
-            f"{indent}HSerSend {item}{('  ' + comment) if (comment and i == 0) else ''}{newline}"
-            for i, item in enumerate(items)
-        )
+        items = split_hserout_items(items_str)
 
-    # HSerIn timeout,label,[a, b] -> a = HSerReceive / If a = 255 Then
-    # GoTo label / ... - HSerReceive's non-blocking "no new data" return
-    # (255) is the closest available stand-in for BASIC's per-byte
-    # timeout; flagged since it isn't exact (255 can also be genuine data,
-    # and the original per-byte wait time isn't reproduced).
+        unclassified = []
+
+        def classify(item):
+            if RE_HSEROUT_STRLIT_ITEM.match(item):
+                return 'HSerPrint'
+            if RE_HSEROUT_NUMLIT_ITEM.match(item):
+                return 'HSerSend'
+            if RE_HSEROUT_CHRASC_ITEM.match(item):
+                return 'HSerSend'
+            if RE_HSEROUT_IDENT_ITEM.match(item):
+                vtype = var_types.get(item.lower(), '')
+                return 'HSerPrint' if vtype == 'string' else 'HSerSend'
+            # A DEC/HEX/STR format modifier, an array index, an
+            # expression, etc. - can't confidently classify as byte vs.
+            # string, so default to HSerSend (matches the old,
+            # unconditional behaviour) but flag it for a manual check.
+            unclassified.append(item)
+            return 'HSerSend'
+
+        classified = [(classify(item), item) for item in items]
+
+        out = []
+        if unclassified:
+            out.append(f"{indent}" + review_note(
+                f"couldn't tell whether {', '.join(unclassified)} is a "
+                f"byte value or a string, so defaulted to HSerSend - use "
+                f"HSerPrint instead if it's a String constant/variable",
+                line) + newline)
+        for i, (cmd, item) in enumerate(classified):
+            line_comment = ('  ' + comment) if (comment and i == 0) else ''
+            out.append(f"{indent}{cmd} {item}{line_comment}{newline}")
+        return ''.join(out)
+
+    # HSerIn timeout,label,[a, b] - not auto-converted. HSerReceive has no
+    # built-in per-byte timeout and no equivalent of General BASIC's STR
+    # receive-modifier (a multi-byte string read), so any generated
+    # approximation risks being silently wrong in a way that's easy to
+    # miss; commented out and flagged for a manual rewrite instead.
     m = RE_HSERIN.match(code)
     if m:
-        indent, _timeout, label, items_str = m.groups()
-        items = [it.strip() for it in items_str.split(',') if it.strip()]
-        out = [f"{indent}' >>> REVIEW: approximated HSerIn's per-byte "
-               f"timeout - GCBASIC's HSerReceive has no built-in timeout, "
-               f"so this reads once and treats the non-blocking \"no new "
-               f"data\" return (255) as a timeout; 255 can also be a "
-               f"genuine received byte, and the original per-byte wait "
-               f"is not reproduced - verify against {label}'s intended "
-               f"behaviour{('  ' + comment) if comment else ''}{newline}"]
-        for item in items:
-            out.append(f"{indent}{item} = HSerReceive{newline}")
-            out.append(f"{indent}If {item} = 255 Then GoTo {label}{newline}")
-        return ''.join(out)
+        indent = m.group(1)
+        return (f"{indent}" + review_note(
+            "HSerIn not converted - GCBASIC's HSerReceive has no "
+            "built-in timeout and no equivalent of General BASIC's STR "
+            "receive-modifier (multi-byte string read); rewrite by hand "
+            "using HSerReceive", line) + newline)
+
+    # Single-line "If cond Then stmt1 : stmt2" -> a full If/End If block.
+    # GCBASIC doesn't support multiple colon-separated statements after
+    # Then on one line; a single statement after Then ("If cond Then
+    # GoTo Label") is already valid as-is and is left untouched.
+    m = RE_IF_THEN_STMT.match(code)
+    if m:
+        indent, cond, then_clause = m.groups()
+        stmts = split_colon_statements(then_clause)
+        if len(stmts) > 1:
+            inner_indent = indent + '    '
+            out = [f"{indent}If {cond} Then{newline}"]
+            for stmt in stmts:
+                out.append(f"{inner_indent}{stmt}{newline}")
+            out.append(f"{indent}End If{('  ' + comment) if comment else ''}{newline}")
+            return ''.join(out)
+        # Single statement, no colon - fall through, leave as-is.
 
     # SerOut pin,baudmode,[a, b, ...] -> Ser1Send a / Ser1Send b / ...
     # (config constants for the Ser1 channel are emitted once in the
@@ -689,7 +768,7 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
     m = RE_SEROUT.match(code)
     if m:
         indent, _pin, _baud, items_str = m.groups()
-        items = [it.strip() for it in items_str.split(',') if it.strip()]
+        items = split_hserout_items(items_str)
         return ''.join(
             f"{indent}Ser1Send {item}{('  ' + comment) if (comment and i == 0) else ''}{newline}"
             for i, item in enumerate(items)
@@ -702,12 +781,12 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
     m = RE_SERIN_TIMEOUT.match(code)
     if m:
         indent, _pin, _baud, _timeout, label, items_str = m.groups()
-        items = [it.strip() for it in items_str.split(',') if it.strip()]
-        out = [f"{indent}' >>> REVIEW: SerIn's timeout/{label} has no "
-               f"GCBASIC equivalent - Ser1Receive blocks waiting for the "
-               f"start bit with no built-in timeout; implement the "
-               f"desired timeout manually if one is needed"
-               f"{('  ' + comment) if comment else ''}{newline}"]
+        items = split_hserout_items(items_str)
+        out = [f"{indent}" + review_note(
+               f"SerIn's timeout/{label} has no GCBASIC equivalent - "
+               f"Ser1Receive blocks waiting for the start bit with no "
+               f"built-in timeout; implement the desired timeout "
+               f"manually if one is needed", line) + newline]
         for item in items:
             out.append(f"{indent}{item} = Ser1Receive{newline}")
         return ''.join(out)
@@ -716,7 +795,7 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
     m = RE_SERIN.match(code)
     if m:
         indent, _pin, _baud, items_str = m.groups()
-        items = [it.strip() for it in items_str.split(',') if it.strip()]
+        items = split_hserout_items(items_str)
         return ''.join(
             f"{indent}{item} = Ser1Receive{('  ' + comment) if (comment and i == 0) else ''}{newline}"
             for i, item in enumerate(items)
@@ -748,41 +827,6 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
         else:
             return f"{indent}EPWrite {addr}, {var}{tail}{newline}"
 
-    # var = ADIn channel -> var = READAD( ANx ) / READAD10( ANx ), chosen
-    # by the target variable's declared type (Byte -> READAD, Word ->
-    # READAD10). Checked before the bare Clear/Set block below since it
-    # shares the "one word + operand" shape.
-    m = RE_ADIN_ASSIGN.match(code)
-    if m:
-        indent, var, chan = m.groups()
-        chan_expr = f"AN{chan}" if chan.isdigit() else chan
-        vtype = var_types.get(var.lower())
-        review = ""
-        if vtype is None:
-            func = "READAD"
-            review = (f" ' >>> REVIEW: type of '{var}' is unknown - defaulted "
-                       f"to READAD (8-bit); use READAD10 instead if '{var}' is a Word")
-        else:
-            vtype_l = vtype.lower()
-            if vtype_l in ('byte', 'bit'):
-                func = "READAD"
-            else:
-                func = "READAD10"
-        tail = (f"  {comment}" if comment else "") + review
-        return f"{indent}{var} = {func}( {chan_expr} ){tail}{newline}"
-
-    # Bare "Clear" (no operand) - PIC BASIC's "zero all RAM"; GCBASIC has
-    # no equivalent statement, so comment it out and flag for review
-    # rather than silently dropping or guessing at a replacement.
-    m = RE_CLEAR_ALONE.match(code)
-    if m:
-        indent = m.group(1)
-        tail = f"  {comment}" if comment else ""
-        return (f"{indent}' Clear{tail}{newline}"
-                 f"{indent}' >>> REVIEW: CLEAR not supported - if you need "
-                 f"to clear RAM, write a specific GCBASIC routine to do "
-                 f"this{newline}")
-
     # Clear name  /  Set name   (bare bit form only - not "Set X On/Off",
     # which is already valid GCBASIC and is left untouched)
     if not RE_SET_ONOFF.match(code):
@@ -797,40 +841,9 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
             tail = f"  {comment}" if comment else ""
             return f"{indent}{name} = 1{tail}{newline}"
 
-    # High name  /  Low name -> name = 1 / name = 0 (drives a pin/bit
-    # directly, e.g. "High PORTB.0" -> "PORTB.0 = 1").
-    m = RE_HIGH_BARE.match(code)
-    if m:
-        indent, name = m.groups()
-        tail = f"  {comment}" if comment else ""
-        return f"{indent}{name} = 1{tail}{newline}"
-    m = RE_LOW_BARE.match(code)
-    if m:
-        indent, name = m.groups()
-        tail = f"  {comment}" if comment else ""
-        return f"{indent}{name} = 0{tail}{newline}"
-
-    # "While <always-true>" as a standalone loop-opening statement (e.g.
-    # "While 1 = 1", "While True") -> GCBASIC's "Do Forever", which is
-    # clearer than an always-true "Do While" condition. Anchored to the
-    # whole statement (^...$) so this only fires when While is the sole
-    # instruction on the line - it must not touch a tautology embedded in
-    # some other loop construct (e.g. a "Loop While ..." post-condition,
-    # which starts with "Loop", not "While", and so never matches here).
-    m = RE_WHILE_ALWAYS_TRUE.match(code)
-    if m:
-        indent = m.group(1)
-        tail = f"  {comment}" if comment else ""
-        return f"{indent}Do Forever{tail}{newline}"
-
     # Everything else: apply the remaining transforms to the code part only.
     code = RE_DELAYMS.sub(r'Wait \1 ms', code)
-    code = RE_DELAYUS.sub(r'Wait \1 us', code)
     code = RE_BINLIT.sub(r'0b\1', code)
-    code, mul_mid_count = RE_MUL_MID.subn(r'((\1) * (\2)) / 256', code)
-    if mul_mid_count:
-        key = "*/ (Multiply Middle) -> (A * B) / 256"
-        lookup_usage[key] = lookup_usage.get(key, 0) + mul_mid_count
     code, bitfield_count = RE_BITFIELD.subn(r'\1.\2', code)
     if bitfield_count:
         key = "REGISTERbits_FIELD -> REGISTER.FIELD"
@@ -852,6 +865,17 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
     code = RE_UNTIL_START.sub(r'\1Loop Until', code)
     code = RE_ELSE_IF.sub('Else If', code)
 
+    def str_bareword_repl(m):
+        varname = m.group(1)
+        if varname.lower() in array_var_names:
+            needs_array_to_string[0] = True
+            return f"ArrayToString({varname})"
+        return f"ByteToString({varname})"
+
+    code = RE_STR_BAREWORD.sub(str_bareword_repl, code)
+    code = RE_TOUPPER.sub('Ucase(', code)
+    code = RE_TOLOWER.sub('Lcase(', code)
+
     def case_repl(match):
         op = match.group(1)
         value = match.group(2).strip()
@@ -865,11 +889,31 @@ def convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=N
 
     code = RE_CASE_REL.sub(case_repl, code)
 
+    # Residual mid-line HSerOut[...] (e.g. "If echo = \"1\" Then HSerOut[...]")
+    # was not handled by the whole-line HSerOut rewriter. Neutralize it with
+    # NOP // so the line still compiles, and emit a REVIEW marker with the
+    # original HSerOut text for manual rewrite (typically to HSerPrint /
+    # HSerSend sequence).
+    residual_hserout = re.search(r'\bHSerOut\s*\[', code, re.IGNORECASE)
+    if residual_hserout:
+        key = "residual HSerOut -> NOP // + REVIEW"
+        lookup_usage[key] = lookup_usage.get(key, 0) + 1
+        # Extract indent from the start of the code line
+        indent_m = re.match(r'^(\s*)', code)
+        indent = indent_m.group(1) if indent_m else ""
+        original_hser = code[residual_hserout.start():].strip()
+        # Replace the HSerOut[...] (and anything after it on the statement)
+        # with NOP // original, keeping any prefix (e.g. "If ... Then ")
+        prefix = code[: residual_hserout.start()]
+        neutralized = f"{prefix}NOP // {original_hser}"
+        review = f"{indent}' >>> REVIEW: {original_hser}{newline}"
+        return review + neutralized + (f"  {comment}" if comment else "") + newline
+
     return code + comment + newline
 
 
 def convert_block_comment_line(line, in_block_comment):
-    """Handle one line that opens, continues, or closes a BASIC
+    """Handle one line that opens, continues, or closes a General BASIC
     Pascal-style (* ... *) block comment. GCBASIC has no block-comment
     syntax - only a leading ' for a same-line comment - so every line
     that falls inside such a block is rewritten as a ' comment line,
@@ -892,7 +936,7 @@ def convert_block_comment_line(line, in_block_comment):
     body = stripped_end
 
     def review(reason_line):
-        return (f"' >>> REVIEW: line commented out - BASIC (* *) block "
+        return (f"' >>> REVIEW: line commented out - General BASIC (* *) block "
                 f"comment shares a line with code here: "
                 f"{reason_line.strip()}{newline}")
 
@@ -977,7 +1021,7 @@ def apply_reserved_renames(lines, renames):
 
 
 def find_array_declarations(lines):
-    """Scan for BASIC-style array declarations: 'Dim NAME [SIZE] As
+    """Scan for General BASIC style array declarations: 'Dim NAME [SIZE] As
     TYPE' (with or without a space before the bracket). Returns the set
     of array names found (original casing), so every NAME[...] use of
     them elsewhere in the file can be rewritten from bracket to paren
@@ -1054,8 +1098,8 @@ def split_port_pin(value):
     return None, None
 
 
-def parse_picbasic_int(token):
-    """Parse a BASIC integer literal: plain decimal, $hex, or %binary."""
+def parse_genbasic_int(token):
+    """Parse a General BASIC integer literal: plain decimal, $hex, or %binary."""
     token = token.strip()
     try:
         if token.startswith('$'):
@@ -1067,11 +1111,11 @@ def parse_picbasic_int(token):
         return None
 
 
-def picbasic_baudmode_to_bps(token):
-    """Convert a BASIC SerOut/SerIn baudmode value to bps, using the
+def genbasic_baudmode_to_bps(token):
+    """Convert a General BASIC SerOut/SerIn baudmode value to bps, using the
     formula this source documents in its own comments (cBaudVal =
     (1000000 / cBaud) - 20), i.e. baud = 1000000 / (baudmode + 20)."""
-    baudmode = parse_picbasic_int(token)
+    baudmode = parse_genbasic_int(token)
     if baudmode is None or baudmode <= -20:
         return None
     return round(1000000 / (baudmode + 20))
@@ -1099,7 +1143,7 @@ def find_serial_config(lines, symbol_values):
             if m:
                 _, pin_token, baud_token, _ = m.groups()
                 port, pin = split_port_pin(symbol_values.get(pin_token, pin_token))
-                bps = picbasic_baudmode_to_bps(baud_token)
+                bps = genbasic_baudmode_to_bps(baud_token)
                 sw_tx = (port, pin, bps)
         if sw_rx is None:
             m = RE_SERIN_TIMEOUT.match(code) or RE_SERIN.match(code)
@@ -1107,9 +1151,46 @@ def find_serial_config(lines, symbol_values):
                 groups = m.groups()
                 pin_token, baud_token = groups[1], groups[2]
                 port, pin = split_port_pin(symbol_values.get(pin_token, pin_token))
-                bps = picbasic_baudmode_to_bps(baud_token)
+                bps = genbasic_baudmode_to_bps(baud_token)
                 sw_rx = (port, pin, bps)
     return hw_used, sw_tx, sw_rx
+
+
+def find_gosub_targets(lines):
+    """Collect every label that is a target of GOSUB/GoSub (case-insensitive
+    keys, original casing from first sighting). Only these labels become
+    Sub/End Sub; plain GOTO targets stay as ordinary labels."""
+    targets = {}  # lower -> original casing
+    for line in lines:
+        stripped_end = line
+        for eol in ("\r\n", "\n", "\r"):
+            if stripped_end.endswith(eol):
+                stripped_end = stripped_end[: -len(eol)]
+                break
+        code, _ = split_code_comment(stripped_end)
+        for m in RE_GOSUB_ANY.finditer(code):
+            name = m.group(1)
+            key = name.lower()
+            if key not in targets:
+                targets[key] = name
+    return targets
+
+
+def _close_converted_sub(out_lines, lookup_usage, reason, newline="\n"):
+    """Emit End Sub, but first drop a trailing Exit Sub so the final
+    Return of the original General BASIC sub becomes just End Sub (not
+    Exit Sub + End Sub)."""
+    # Drop trailing blank lines temporarily
+    while out_lines and out_lines[-1].strip() == "":
+        out_lines.pop()
+    if out_lines and re.match(r'^\s*Exit\s+Sub\b', out_lines[-1], re.IGNORECASE):
+        out_lines.pop()
+        # also drop blanks that were between Exit Sub and what follows
+        while out_lines and out_lines[-1].strip() == "":
+            out_lines.pop()
+    out_lines.append(f"End Sub{newline}")
+    key = f"End Sub ({reason})"
+    lookup_usage[key] = lookup_usage.get(key, 0) + 1
 
 
 def convert_source(text, source_name, fallback_xtal=None):
@@ -1122,7 +1203,7 @@ def convert_source(text, source_name, fallback_xtal=None):
     if reserved_renames:
         lines = apply_reserved_renames(lines, reserved_renames)
 
-    # Rewrite BASIC-style "Dim NAME [SIZE] As TYPE" arrays and every
+    # Rewrite General BASIC style "Dim NAME [SIZE] As TYPE" arrays and every
     # NAME[index] use of them to GCBASIC's NAME(SIZE) / NAME(index) form.
     array_names = find_array_declarations(lines)
     if array_names:
@@ -1133,14 +1214,20 @@ def convert_source(text, source_name, fallback_xtal=None):
     symbol_values = find_constant_values(lines)
     hw_serial_used, sw_serial_tx, sw_serial_rx = find_serial_config(lines, symbol_values)
 
+    # Labels that are GOSUB targets become Sub/End Sub (not plain labels).
+    gosub_targets = find_gosub_targets(lines)
+
     # If HEF (Hybrid EEPROM/Flash) memory is referenced anywhere, the chip
     # may not define ChipHEFMemWords directly - add the fallback #script
     # block so it's derived from ChipSAFMemWords instead.
     hef_used = any(re.search(r'HEF', line, re.IGNORECASE) for line in lines)
 
     var_types = build_type_map(lines)
+    array_var_names = build_array_var_names(lines)
     needs_helpers = [False]
+    needs_array_to_string = [False]
     lookup_usage = {}
+    hserprint_tmp_counter = [0]
 
     out_lines = []
     chip_inserted = False
@@ -1148,24 +1235,18 @@ def convert_source(text, source_name, fallback_xtal=None):
     xtal_val = None
 
     # First scan for Device=/Xtal= so we can merge them into one #chip line
-    # at the position of the first one encountered. Also scan for a
-    # On_Hardware_Interrupt target so its Sub declaration can be renamed
-    # to "Interrupt" wherever it's found.
-    interrupt_sub_name = None
+    # at the position of the first one encountered.
     for line in lines:
-        code, _ = split_code_comment(line.rstrip('\r\n'))
-        m = RE_DEVICE.match(code)
+        m = RE_DEVICE.match(line)
         if m:
             device_val = m.group(1)
-        m = RE_XTAL.match(code)
+        m = RE_XTAL.match(line)
         if m:
             xtal_val = m.group(1)
-        m = RE_ON_HW_INTERRUPT.match(code)
-        if m:
-            interrupt_sub_name = m.group(2)
 
     select_case_var = None
     in_block_comment = False
+    in_converted_sub = False  # True while inside a Sub opened from a GOSUB target
     for line in lines:
         if in_block_comment or RE_BLOCK_COMMENT_START.search(line):
             converted_line, in_block_comment = convert_block_comment_line(
@@ -1174,9 +1255,7 @@ def convert_source(text, source_name, fallback_xtal=None):
             out_lines.append(converted_line)
             continue
 
-        precheck_code, _ = split_code_comment(line.rstrip('\r\n'))
-
-        if RE_DEVICE.match(precheck_code):
+        if RE_DEVICE.match(line):
             if not chip_inserted:
                 speed = xtal_val or fallback_xtal
                 if device_val and speed:
@@ -1188,15 +1267,53 @@ def convert_source(text, source_name, fallback_xtal=None):
                         "' >>> REVIEW: no Xtal= found - set clock speed "
                         "above, e.g. '#chip {}, 20'\n".format(device_val)
                     )
-                # #option explicit requires every variable to be Dim'd
-                # before use - always added right after #chip so typos
-                # in variable names are caught at compile time rather
-                # than silently creating a new implicit variable.
-                out_lines.append("#option explicit\n")
                 chip_inserted = True
             continue  # drop the original Device= line either way
-        if RE_XTAL.match(precheck_code):
+        if RE_XTAL.match(line):
             continue  # already folded into #chip line above
+
+        # --- Sub / Exit Sub / End Sub handling (scope-aware) ---------------
+        stripped_end = line
+        newline = ""
+        for eol in ("\r\n", "\n", "\r"):
+            if stripped_end.endswith(eol):
+                newline = eol
+                stripped_end = stripped_end[: -len(eol)]
+                break
+        code_only, comment_only = split_code_comment(stripped_end)
+
+        # Opening of a GOSUB-target subroutine: label: -> Sub name
+        m_label = RE_LABEL_DEF.match(code_only)
+        if m_label:
+            indent, name = m_label.groups()
+            if name.lower() in gosub_targets:
+                if in_converted_sub:
+                    _close_converted_sub(out_lines, lookup_usage, "close previous Sub", newline)
+                sub_name = gosub_targets.get(name.lower(), name)
+                out_lines.append(
+                    f"{indent}Sub {sub_name}"
+                    f"{('  ' + comment_only) if comment_only else ''}{newline}"
+                )
+                key = "label: (GOSUB target) -> Sub name"
+                lookup_usage[key] = lookup_usage.get(key, 0) + 1
+                in_converted_sub = True
+                continue
+            # Ordinary label (GOTO target, mid-sub jump target like CFG:, etc.)
+            # is left as a normal label and does NOT close the current Sub.
+
+        # Bare Return inside a converted Sub -> Exit Sub
+        # (trailing Exit Sub is removed when the Sub is closed, so the
+        # final Return becomes just End Sub)
+        m_ret = RE_RETURN_BARE.match(code_only)
+        if m_ret and in_converted_sub:
+            indent = m_ret.group(1)
+            out_lines.append(
+                f"{indent}Exit Sub"
+                f"{('  ' + comment_only) if comment_only else ''}{newline}"
+            )
+            key = "Return -> Exit Sub (inside Sub)"
+            lookup_usage[key] = lookup_usage.get(key, 0) + 1
+            continue
 
         code, _ = split_code_comment(line)
         m = RE_SELECT_CASE.match(code)
@@ -1207,7 +1324,12 @@ def convert_source(text, source_name, fallback_xtal=None):
         elif code.strip().upper() == 'END SELECT':
             select_case_var = None
 
-        out_lines.append(convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=select_case_var, interrupt_sub_name=interrupt_sub_name))
+        out_lines.append(convert_line(line, var_types, needs_helpers, lookup_usage, select_case_var=select_case_var, tmp_counter=hserprint_tmp_counter, array_var_names=array_var_names, needs_array_to_string=needs_array_to_string))
+
+    # Close any Sub still open at EOF
+    if in_converted_sub:
+        _close_converted_sub(out_lines, lookup_usage, "close at EOF", "\n")
+
 
     body = ''.join(out_lines)
     header = HEADER_TEMPLATE.format(
@@ -1215,11 +1337,12 @@ def convert_source(text, source_name, fallback_xtal=None):
         date=CONVERTER_DATE,
         os=CONVERTER_OS,
         build=CONVERTER_BUILD,
+        version=CONVERTER_VERSION,
     )
     if reserved_renames:
         header += (
             "' NOTE: the following Symbol constant(s) were renamed because\n"
-            "' their BASIC name collides with a GCBASIC reserved\n"
+            "' their General BASIC name collides with a GCBASIC reserved\n"
             "' math/logic operator - every use in this file was updated:\n"
         )
         for old_name, new_name in reserved_renames.items():
@@ -1302,13 +1425,15 @@ def convert_source(text, source_name, fallback_xtal=None):
 
     if needs_helpers[0]:
         result += HELPER_SUBS
+    if needs_array_to_string[0]:
+        result += ARRAYTOSTRING_HELPER
 
     return result, review_count, lookup_usage
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert a BASIC-style .bas source file to GCBASIC syntax."
+        description="Convert a General BASIC style .bas source file to GCBASIC syntax."
     )
     parser.add_argument("source", help="Path to the source .bas file to convert")
     parser.add_argument(
